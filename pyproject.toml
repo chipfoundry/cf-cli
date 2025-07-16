@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "chipfoundry-cli"
-version = "0.1.2"
+version = "0.1.3"
 description = "CLI tool to automate ChipFoundry project submission to SFTP server"
 authors = ["ChipFoundry <marwan.abbas@chipfoundry.io>"]
 readme = "README.md"
