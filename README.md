@@ -44,7 +44,3 @@ chipfoundry-cli --project-root my_project --sftp-host sftp.example.com --sftp-us
 - **Progress Bar**: Shows upload progress (requires `tqdm`)
 - **Dry Run**: Preview what would be uploaded
 - **Robust Error Handling**: Clear messages for missing files, SFTP errors, and more
-
-## License
-
-MIT License 
