@@ -12,7 +12,7 @@ packages = [{ include = "chipfoundry_cli" }]
 [tool.poetry.dependencies]
 python = ">=3.8.0"
 click = ">=8.0.0,<9"
-rich = ">=12,<14"
+rich = ">=13,<14"
 paramiko = ">=3.0.0,<4"
 
 [tool.poetry.dev-dependencies]
@@ -22,7 +22,6 @@ flake8 = ">=4"
 
 [tool.poetry.scripts]
 chipfoundry = "chipfoundry_cli.main:main"
-cf = "chipfoundry_cli.main:main"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
