@@ -15,8 +15,8 @@ A command-line tool to automate the submission of ChipFoundry projects to the SF
 Install from PyPI:
 
 ```bash
-pip install cf-cli
-cf --help
+pip install chipfoundry-cli
+chipfoundry --help
 ```
 
 ---
@@ -63,39 +63,57 @@ my_project/
 
 ## Usage
 
-### Basic Submission (Digital Project)
+### Configure User Credentials
 
 ```bash
-cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username>
+chipfoundry config
 ```
+- Prompts for your SFTP username and key path. Only needs to be run once per user/machine.
 
-### With a Custom SSH Key
+### Initialize a New Project
 
 ```bash
-cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --sftp-key /path/to/id_rsa
+chipfoundry init
 ```
+- Prompts for project name, type (auto-detected from GDS file if present), and version.
+- Creates `.cf/project.json` in the current directory.
+- **Note:** The GDS hash is NOT generated at this step (see below).
 
-### With Password Authentication
+### Push a Project (Upload)
 
 ```bash
-cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --sftp-password <your_password>
+chipfoundry push
 ```
+- Run from your project directory (with `.cf/project.json`).
+- Collects files, updates the GDS hash, and uploads to SFTP.
 
-### Dry Run (Preview what will be uploaded)
+### Pull Results
 
 ```bash
-cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --dry-run
+chipfoundry pull
 ```
+- Downloads results for the current project to a local directory.
 
-### Override Project Name or ID
+### Check Status
 
 ```bash
-cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --project-name my_custom_name --project-id my_custom_id
+chipfoundry status
 ```
+- Shows all your projects and their input/output status on the SFTP server.
 
 ---
 
-## What Happens When You Run `cf submit`?
+## How the GDS Hash Works
+
+- The `user_project_wrapper_hash` in `.cf/project.json` is **automatically generated and updated during `push`**.
+- The hash is calculated from the actual GDS file being uploaded.
+- This ensures the hash always matches the file you are submitting.
+- **You do not need to manage or update the hash manually.**
+- The hash is NOT generated during `init` because the GDS file may not exist or may change before submission.
+
+---
+
+## What Happens When You Run `chipfoundry push`?
 
 1. **File Collection:**
    - The tool checks for the required GDS and Verilog files.
@@ -123,6 +141,8 @@ cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_u
   - Check your network connection and credentials.
 - **Project type detection:**
   - Only one of the recognized GDS files should be present in your `gds/` directory.
+- **ModuleNotFoundError: No module named 'toml':**
+  - This means your environment is missing the `toml` dependency. Upgrade `chipfoundry-cli` with `pip install --upgrade chipfoundry-cli`, or install `toml` manually with `pip install 'toml>=0.10,<1.0'`.
 
 ---
 

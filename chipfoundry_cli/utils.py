@@ -6,6 +6,7 @@ import json
 import hashlib
 import paramiko
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TaskProgressColumn
+import toml
 
 REQUIRED_FILES = {
     ".cf/project.json": False,  # Optional, may not exist
@@ -178,3 +179,18 @@ def upload_with_progress(sftp, local_path, remote_path, force_overwrite=False):
         result = sftp_upload_file(sftp, local_path, remote_path, force_overwrite, progress_cb=progress_cb)
         progress.update(task, completed=file_size)
         return result 
+
+def get_config_path() -> Path:
+    return Path.home() / ".chipfoundry-cli" / "config.toml"
+
+def load_user_config() -> dict:
+    config_path = get_config_path()
+    if config_path.exists():
+        return toml.load(config_path)
+    return {}
+
+def save_user_config(config: dict):
+    config_path = get_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, 'w') as f:
+        toml.dump(config, f) 
