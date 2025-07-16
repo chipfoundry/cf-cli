@@ -1,46 +1,140 @@
-# ChipFoundry CLI Tool
+# ChipFoundry CLI (`cf-cli`)
 
-A Python CLI tool to automate the submission of ChipFoundry projects to an SFTP server. Collects project files, generates/updates project.json, and uploads to the correct SFTP directory.
+A command-line tool to automate the submission of ChipFoundry projects to the SFTP server.
+
+---
+
+## Overview
+
+`cf-cli` is a user-friendly command-line tool for securely submitting your ChipFoundry project files to the official SFTP server. It automatically collects the required files, generates or updates your project configuration, and uploads everything to the correct location on the server.
+
+---
 
 ## Installation
 
+### Using Poetry (Recommended)
+
 ```bash
-pip install .
+pip install poetry  # if you don't have it
+poetry install  # in the project directory
+poetry run cf --help
 ```
+
+### Using pip (from PyPI, once published)
+
+```bash
+pip install cf-cli
+cf --help
+```
+
+---
+
+## Project Structure Requirements
+
+Your project directory **must** contain:
+
+- `gds/` directory with **one** of the following:
+  - `user_project_wrapper.gds` (for digital projects)
+  - `user_analog_project_wrapper.gds` (for analog projects)
+  - `openframe_project_wrapper.gds` (for openframe projects)
+- `verilog/rtl/user_defines.v` (required for digital/analog)
+- `.cf/project.json` (optional; will be created/updated automatically)
+
+**Example:**
+```
+my_project/
+├── gds/
+│   └── user_project_wrapper.gds
+├── verilog/
+│   └── rtl/
+│       └── user_defines.v
+└── .cf/
+    └── project.json
+```
+
+---
+
+## Authentication
+
+- By default, the tool will look for an SSH key at `~/.ssh/id_rsa`.
+- You can specify a different key with `--sftp-key`.
+- If no key is found, you will be prompted to enter a key path or your SFTP password.
+- Your SFTP username is required (provided by ChipFoundry).
+
+---
+
+## SFTP Server
+
+- The default SFTP server is `sftp.chipfoundry.io` (no need to specify unless you want to override).
+
+---
 
 ## Usage
 
-```bash
-chipfoundry-cli --project-root <path> --sftp-host <hostname> --sftp-username <username> [options]
-```
-
-### Required Project Structure
-
-Your project directory should contain:
-
-- `.cf/project.json` (optional, will be created/updated if missing)
-- `gds/user_project_wrapper.gds` (required)
-- `verilog/rtl/user_defines.v` (required)
-
-### Example (Dry Run)
+### Basic Submission (Digital Project)
 
 ```bash
-chipfoundry-cli --project-root my_project --sftp-host sftp.example.com --sftp-username user123 --project-name my_proj --dry-run
+cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username>
 ```
 
-### Options
+### With a Custom SSH Key
 
-- `--sftp-password <password>`: SFTP password (prompted if not provided)
-- `--sftp-key <path>`: Path to SFTP private key (alternative to password)
-- `--project-id <id>`: Override project ID
-- `--project-name <name>`: Override project name
-- `--project-type <type>`: Override project type
-- `--project-slot <slot>`: Override project slot
-- `--force-overwrite`: Overwrite existing files on SFTP
-- `--dry-run`: Preview actions without uploading files
+```bash
+cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --sftp-key /path/to/id_rsa
+```
 
-### Features
+### With Password Authentication
 
-- **Progress Bar**: Shows upload progress (requires `tqdm`)
-- **Dry Run**: Preview what would be uploaded
-- **Robust Error Handling**: Clear messages for missing files, SFTP errors, and more
+```bash
+cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --sftp-password <your_password>
+```
+
+### Dry Run (Preview what will be uploaded)
+
+```bash
+cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --dry-run
+```
+
+### Override Project Name or ID
+
+```bash
+cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_username> --project-name my_custom_name --project-id my_custom_id
+```
+
+---
+
+## What Happens When You Run `cf submit`?
+
+1. **File Collection:**
+   - The tool checks for the required GDS and Verilog files.
+   - It auto-detects your project type (digital, analog, openframe) based on the GDS file name.
+2. **Configuration:**
+   - If `.cf/project.json` does not exist, it is created.
+   - The tool updates the GDS hash and any fields you override via CLI.
+3. **SFTP Upload:**
+   - Connects to the SFTP server as your user.
+   - Ensures the directory `incoming/projects/<project_name>` exists.
+   - Uploads `.cf/project.json`, the GDS file, and `verilog/rtl/user_defines.v` (if present).
+   - Shows a progress bar for each file upload.
+4. **Success:**
+   - You’ll see a green success message when all files are uploaded.
+
+---
+
+## Troubleshooting
+
+- **Missing files:**
+  - The tool will error out if required files are missing or if more than one GDS type is present.
+- **Authentication errors:**
+  - Make sure your SSH key is valid and registered with ChipFoundry, or use your password.
+- **SFTP errors:**
+  - Check your network connection and credentials.
+- **Project type detection:**
+  - Only one of the recognized GDS files should be present in your `gds/` directory.
+
+---
+
+## Support
+
+- For help, contact support@chipfoundry.io or visit [chipfoundry.io](https://chipfoundry.io)
+- For bug reports or feature requests, open an issue on [GitHub](https://github.com/chipfoundry/cf-cli)
