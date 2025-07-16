@@ -128,5 +128,5 @@ cf submit --project-root /path/to/my_project --sftp-username <your_chipfoundry_u
 
 ## Support
 
-- For help, contact support@chipfoundry.io or visit [chipfoundry.io](https://chipfoundry.io)
+- For help, contact info@chipfoundry.io or visit [chipfoundry.io](https://chipfoundry.io)
 - For bug reports or feature requests, open an issue on [GitHub](https://github.com/chipfoundry/cf-cli)
