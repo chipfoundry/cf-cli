@@ -12,15 +12,7 @@ A command-line tool to automate the submission of ChipFoundry projects to the SF
 
 ## Installation
 
-### Using Poetry (Recommended)
-
-```bash
-pip install poetry  # if you don't have it
-poetry install  # in the project directory
-poetry run cf --help
-```
-
-### Using pip (from PyPI, once published)
+Install from PyPI:
 
 ```bash
 pip install cf-cli
