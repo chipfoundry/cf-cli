@@ -142,6 +142,9 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
     # Determine which authentication method to use
     key_path = sftp_key
     password = sftp_password
+    # Always resolve key_path to absolute path if set
+    if key_path:
+        key_path = os.path.abspath(os.path.expanduser(key_path))
     if not key_path and not password:
         if os.path.exists(DEFAULT_SSH_KEY):
             key_path = DEFAULT_SSH_KEY
@@ -295,6 +298,9 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key, sftp_pass
         sftp_key = config.get("sftp_key")
     key_path = sftp_key
     password = sftp_password
+    # Always resolve key_path to absolute path if set
+    if key_path:
+        key_path = os.path.abspath(os.path.expanduser(key_path))
     if not key_path and not password:
         if os.path.exists(DEFAULT_SSH_KEY):
             key_path = DEFAULT_SSH_KEY
@@ -385,6 +391,9 @@ def status(sftp_host, sftp_username, sftp_key, sftp_password):
         sftp_key = config.get("sftp_key")
     key_path = sftp_key
     password = sftp_password
+    # Always resolve key_path to absolute path if set
+    if key_path:
+        key_path = os.path.abspath(os.path.expanduser(key_path))
     if not key_path and not password:
         if os.path.exists(DEFAULT_SSH_KEY):
             key_path = DEFAULT_SSH_KEY
