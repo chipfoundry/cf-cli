@@ -48,6 +48,8 @@ def config_cmd():
     key_path = console.input("Enter path to your SFTP private key (leave blank for ~/.ssh/id_rsa): ").strip()
     if not key_path:
         key_path = os.path.expanduser('~/.ssh/id_rsa')
+    else:
+        key_path = os.path.abspath(os.path.expanduser(key_path))
     config = {
         "sftp_username": username,
         "sftp_key": key_path,
@@ -143,7 +145,9 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
     key_path = sftp_key
     password = sftp_password
     # Always resolve key_path to absolute path if set
+    print(f"key_path: {key_path}")
     if key_path:
+        print(f"key_path: {key_path}")
         key_path = os.path.abspath(os.path.expanduser(key_path))
     if not key_path and not password:
         if os.path.exists(DEFAULT_SSH_KEY):
