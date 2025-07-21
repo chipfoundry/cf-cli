@@ -104,13 +104,30 @@ def update_or_create_project_json(
     save_project_json(project_json_path, data)
     return project_json_path 
 
+def load_private_key(key_path, password=None):
+    key_loaders = [
+        paramiko.Ed25519Key.from_private_key_file,
+        paramiko.RSAKey.from_private_key_file,
+        paramiko.ECDSAKey.from_private_key_file,
+        paramiko.DSSKey.from_private_key_file,
+    ]
+    last_exception = None
+    for loader in key_loaders:
+        try:
+            return loader(key_path, password=password)
+        except paramiko.ssh_exception.PasswordRequiredException:
+            raise  # Key is encrypted, need password
+        except Exception as e:
+            last_exception = e
+    raise RuntimeError(f"Could not load private key: {last_exception}")
+
 def sftp_connect(host: str, username: str, password: str = None, key_path: str = None):
     """
     Establish an SFTP connection using paramiko. Returns an SFTP client.
     """
     transport = paramiko.Transport((host, 22))
     if key_path:
-        private_key = paramiko.RSAKey.from_private_key_file(key_path)
+        private_key = load_private_key(key_path)
         transport.connect(username=username, pkey=private_key)
     else:
         transport.connect(username=username, password=password)
