@@ -203,13 +203,12 @@ def init(project_root):
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
 @click.option('--sftp-username', required=False, help='SFTP username (defaults to config).')
 @click.option('--sftp-key', type=click.Path(exists=True, dir_okay=False), help='Path to SFTP private key file (defaults to config).', default=None, show_default=False)
-@click.option('--sftp-password', help='SFTP password. If not provided, will prompt securely.', default=None)
 @click.option('--project-id', help='Project ID (e.g., "user123_proj456"). Overrides project.json if exists.')
 @click.option('--project-name', help='Project name (e.g., "my_project"). Overrides project.json if exists.')
 @click.option('--project-type', help='Project type (auto-detected if not provided).', default=None)
 @click.option('--force-overwrite', is_flag=True, help='Overwrite existing files on SFTP without prompting.')
 @click.option('--dry-run', is_flag=True, help='Preview actions without uploading files.')
-def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, project_id, project_name, project_type, force_overwrite, dry_run):
+def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_name, project_type, force_overwrite, dry_run):
     """Upload your project files to the ChipFoundry SFTP server."""
     # If .cf/project.json exists in cwd, use it as default project_root and project_name
     cwd_root, cwd_project_name = get_project_json_from_cwd()
@@ -229,25 +228,17 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
             raise click.Abort()
     if not sftp_key:
         sftp_key = config.get("sftp_key")
-    # Determine which authentication method to use
-    key_path = sftp_key
-    password = sftp_password
+    
     # Always resolve key_path to absolute path if set
-    if key_path:
-        key_path = os.path.abspath(os.path.expanduser(key_path))
-    if not key_path and not password:
-        if os.path.exists(DEFAULT_SSH_KEY):
-            key_path = DEFAULT_SSH_KEY
-        else:
-            console.print("[yellow]No SFTP credentials found. Please run 'cf config' first.[/yellow]")
-            raise click.Abort()
-    elif key_path and password:
-        console.print("[red]Options --sftp-password and --sftp-key are mutually exclusive.[/red]")
-        raise click.UsageError("Options --sftp-password and --sftp-key are mutually exclusive.")
-    elif key_path and not password:
-        if not os.path.exists(key_path):
-            console.print(f"[red]SFTP key file not found: {key_path}[/red]")
-            raise click.UsageError(f"SFTP key file not found: {key_path}")
+    if sftp_key:
+        key_path = os.path.abspath(os.path.expanduser(sftp_key))
+    else:
+        key_path = DEFAULT_SSH_KEY
+    
+    if not os.path.exists(key_path):
+        console.print(f"[red]SFTP key file not found: {key_path}[/red]")
+        console.print("[yellow]Please run 'cf keygen' to generate a key or 'cf config' to set a custom key path.[/yellow]")
+        raise click.Abort()
 
     # Collect project files
     try:
@@ -321,7 +312,6 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
         sftp, transport = sftp_connect(
             host=sftp_host,
             username=sftp_username,
-            password=password,
             key_path=key_path
         )
         # Ensure the project directory exists before uploading
@@ -356,8 +346,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
 @click.option('--sftp-username', required=False, help='SFTP username (defaults to config).')
 @click.option('--sftp-key', type=click.Path(exists=True, dir_okay=False), help='Path to SFTP private key file (defaults to config).', default=None, show_default=False)
-@click.option('--sftp-password', help='SFTP password. If not provided, will prompt securely.', default=None)
-def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key, sftp_password):
+def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
     """Download results/artifacts from SFTP output dir to local sftp-output/<project_name>."""
     # If .cf/project.json exists in cwd, use its project name as default
     _, cwd_project_name = get_project_json_from_cwd()
@@ -374,43 +363,28 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key, sftp_pass
             raise click.Abort()
     if not sftp_key:
         sftp_key = config.get("sftp_key")
-    key_path = sftp_key
-    password = sftp_password
+    
     # Always resolve key_path to absolute path if set
-    if key_path:
-        key_path = os.path.abspath(os.path.expanduser(key_path))
-    if not key_path and not password:
-        if os.path.exists(DEFAULT_SSH_KEY):
-            key_path = DEFAULT_SSH_KEY
-            console.print(f"[INFO] Using default SSH key: {DEFAULT_SSH_KEY}", style="bold cyan")
-        else:
-            console.print("[WARN] No SFTP key or password provided, and no default key found at ~/.ssh/id_rsa.", style="bold yellow")
-            auth_method = click.prompt("Choose authentication method (key/password)", type=click.Choice(['key', 'password']), show_choices=True)
-            if auth_method == 'key':
-                key_path = click.prompt("Enter path to SFTP private key", type=click.Path(exists=True, dir_okay=False))
-            else:
-                password = click.prompt("SFTP Password", hide_input=True)
-    elif key_path and password:
-        console.print("[ERROR] Options --sftp-password and --sftp-key are mutually exclusive.", style="bold red")
-        raise click.UsageError("Options --sftp-password and --sftp-key are mutually exclusive.")
-    elif not key_path and password:
-        pass  # password provided
-    elif key_path and not password:
-        if not os.path.exists(key_path):
-            console.print(f"[ERROR] SFTP key file not found: {key_path}", style="bold red")
-            raise click.UsageError(f"SFTP key file not found: {key_path}")
+    if sftp_key:
+        key_path = os.path.abspath(os.path.expanduser(sftp_key))
+    else:
+        key_path = DEFAULT_SSH_KEY
+    
+    if not os.path.exists(key_path):
+        console.print(f"[red]SFTP key file not found: {key_path}[/red]")
+        console.print("[yellow]Please run 'cf keygen' to generate a key or 'cf config' to set a custom key path.[/yellow]")
+        raise click.Abort()
 
-    console.print(f"[INFO] Connecting to SFTP: {sftp_host} as {sftp_username}", style="bold cyan")
+    console.print(f"Connecting to {sftp_host}...")
     transport = None
     try:
         sftp, transport = sftp_connect(
             host=sftp_host,
             username=sftp_username,
-            password=password,
             key_path=key_path
         )
     except Exception as e:
-        console.print(f"[ERROR] Failed to connect to SFTP: {e}", style="bold red")
+        console.print(f"[red]Failed to connect to SFTP: {e}[/red]")
         raise click.Abort()
     try:
         remote_dir = f"outgoing/results/{project_name}"
@@ -456,54 +430,38 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key, sftp_pass
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
 @click.option('--sftp-username', required=False, help='SFTP username (defaults to config).')
 @click.option('--sftp-key', type=click.Path(exists=True, dir_okay=False), help='Path to SFTP private key file (defaults to config).', default=None, show_default=False)
-@click.option('--sftp-password', help='SFTP password. If not provided, will prompt securely.', default=None)
-def status(sftp_host, sftp_username, sftp_key, sftp_password):
+def status(sftp_host, sftp_username, sftp_key):
     """Show all projects and outputs for the user on the SFTP server."""
     config = load_user_config()
     if not sftp_username:
         sftp_username = config.get("sftp_username")
         if not sftp_username:
-            console.print("[bold red]No SFTP username provided and not found in config. Please run 'chipfoundry init' or provide --sftp-username.[/bold red]")
+            console.print("[red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/red]")
             raise click.Abort()
     if not sftp_key:
         sftp_key = config.get("sftp_key")
-    key_path = sftp_key
-    password = sftp_password
+    
     # Always resolve key_path to absolute path if set
-    if key_path:
-        key_path = os.path.abspath(os.path.expanduser(key_path))
-    if not key_path and not password:
-        if os.path.exists(DEFAULT_SSH_KEY):
-            key_path = DEFAULT_SSH_KEY
-            console.print(f"[INFO] Using default SSH key: {DEFAULT_SSH_KEY}", style="bold cyan")
-        else:
-            console.print("[WARN] No SFTP key or password provided, and no default key found at ~/.ssh/id_rsa.", style="bold yellow")
-            auth_method = click.prompt("Choose authentication method (key/password)", type=click.Choice(['key', 'password']), show_choices=True)
-            if auth_method == 'key':
-                key_path = click.prompt("Enter path to SFTP private key", type=click.Path(exists=True, dir_okay=False))
-            else:
-                password = click.prompt("SFTP Password", hide_input=True)
-    elif key_path and password:
-        console.print("[ERROR] Options --sftp-password and --sftp-key are mutually exclusive.", style="bold red")
-        raise click.UsageError("Options --sftp-password and --sftp-key are mutually exclusive.")
-    elif not key_path and password:
-        pass  # password provided
-    elif key_path and not password:
-        if not os.path.exists(key_path):
-            console.print(f"[ERROR] SFTP key file not found: {key_path}", style="bold red")
-            raise click.UsageError(f"SFTP key file not found: {key_path}")
+    if sftp_key:
+        key_path = os.path.abspath(os.path.expanduser(sftp_key))
+    else:
+        key_path = DEFAULT_SSH_KEY
+    
+    if not os.path.exists(key_path):
+        console.print(f"[red]SFTP key file not found: {key_path}[/red]")
+        console.print("[yellow]Please run 'cf keygen' to generate a key or 'cf config' to set a custom key path.[/yellow]")
+        raise click.Abort()
 
-    console.print(f"[INFO] Connecting to SFTP: {sftp_host} as {sftp_username}", style="bold cyan")
+    console.print(f"Connecting to {sftp_host}...")
     transport = None
     try:
         sftp, transport = sftp_connect(
             host=sftp_host,
             username=sftp_username,
-            password=password,
             key_path=key_path
         )
     except Exception as e:
-        console.print(f"[ERROR] Failed to connect to SFTP: {e}", style="bold red")
+        console.print(f"[red]Failed to connect to SFTP: {e}[/red]")
         raise click.Abort()
     try:
         # List projects in incoming/projects/ and outgoing/results/

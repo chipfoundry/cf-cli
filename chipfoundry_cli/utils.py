@@ -121,16 +121,13 @@ def load_private_key(key_path, password=None):
             last_exception = e
     raise RuntimeError(f"Could not load private key: {last_exception}")
 
-def sftp_connect(host: str, username: str, password: str = None, key_path: str = None):
+def sftp_connect(host: str, username: str, key_path: str):
     """
     Establish an SFTP connection using paramiko. Returns an SFTP client.
     """
     transport = paramiko.Transport((host, 22))
-    if key_path:
-        private_key = load_private_key(key_path)
-        transport.connect(username=username, pkey=private_key)
-    else:
-        transport.connect(username=username, password=password)
+    private_key = load_private_key(key_path)
+    transport.connect(username=username, pkey=private_key)
     sftp = paramiko.SFTPClient.from_transport(transport)
     return sftp, transport
 
