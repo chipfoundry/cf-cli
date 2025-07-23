@@ -14,8 +14,10 @@ import importlib.metadata
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TaskProgressColumn
 import json
+import subprocess
+import sys
 
-DEFAULT_SSH_KEY = os.path.expanduser('~/.ssh/id_rsa')
+DEFAULT_SSH_KEY = os.path.expanduser('~/.ssh/chipfoundry-key')
 DEFAULT_SFTP_HOST = 'sftp.chipfoundry.io'
 
 GDS_TYPE_MAP = {
@@ -45,9 +47,9 @@ def config_cmd():
     """Configure user-level SFTP credentials (username and key)."""
     console.print("[bold cyan]ChipFoundry CLI User Configuration[/bold cyan]")
     username = console.input("Enter your ChipFoundry SFTP username: ").strip()
-    key_path = console.input("Enter path to your SFTP private key (leave blank for ~/.ssh/id_rsa): ").strip()
+    key_path = console.input("Enter path to your SFTP private key (leave blank for ~/.ssh/chipfoundry-key): ").strip()
     if not key_path:
-        key_path = os.path.expanduser('~/.ssh/id_rsa')
+        key_path = os.path.expanduser('~/.ssh/chipfoundry-key')
     else:
         key_path = os.path.abspath(os.path.expanduser(key_path))
     config = {
@@ -56,6 +58,87 @@ def config_cmd():
     }
     save_user_config(config)
     console.print(f"[green]Configuration saved to {get_config_path()}[/green]")
+
+@main.command('keygen')
+@click.option('--overwrite', is_flag=True, help='Overwrite existing key if it already exists.')
+def keygen(overwrite):
+    """Generate SSH key for ChipFoundry SFTP access."""
+    ssh_dir = Path.home() / '.ssh'
+    private_key_path = ssh_dir / 'chipfoundry-key'
+    public_key_path = ssh_dir / 'chipfoundry-key.pub'
+    
+    # Ensure .ssh directory exists
+    ssh_dir.mkdir(mode=0o700, exist_ok=True)
+    
+    # Check if key already exists
+    if private_key_path.exists() and public_key_path.exists():
+        if not overwrite:
+            console.print(f"[yellow]SSH key already exists at {private_key_path}[/yellow]")
+            console.print("[cyan]Here's your existing public key:[/cyan]")
+            with open(public_key_path, 'r') as f:
+                public_key = f.read().strip()
+                print(f"{public_key}", end="")
+            print("")
+            console.print("[bold cyan]Next steps:[/bold cyan]")
+            console.print("1. Copy the public key above")
+            console.print("2. Submit it to the registration form at: https://chipfoundry.io/sftp-registration")
+            console.print("3. Wait for account approval")
+            console.print("4. Use 'cf config' to configure your SFTP credentials")
+            return
+        else:
+            console.print(f"[yellow]Overwriting existing key at {private_key_path}[/yellow]")
+            # Remove existing files
+            if private_key_path.exists():
+                private_key_path.unlink()
+            if public_key_path.exists():
+                public_key_path.unlink()
+    
+    # Generate new SSH key
+    console.print("[cyan]Generating new RSA SSH key for ChipFoundry...[/cyan]")
+    
+    try:
+        # Use ssh-keygen to generate the key
+        cmd = [
+            'ssh-keygen',
+            '-t', 'rsa',
+            '-b', '4096',
+            '-f', str(private_key_path),
+            '-N', ''  # No passphrase
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        
+        # Set proper permissions
+        private_key_path.chmod(0o600)
+        public_key_path.chmod(0o644)
+        
+        console.print(f"[green]SSH key generated successfully![/green]")
+        console.print(f"[cyan]Private key: {private_key_path}[/cyan]")
+        console.print(f"[cyan]Public key: {public_key_path}[/cyan]")
+        
+        # Read and display the public key
+        with open(public_key_path, 'r') as f:
+            public_key = f.read().strip()
+        
+        console.print("[bold cyan]Your public key:[/bold cyan]")
+        print(f"{public_key}", end="")
+        print("")
+        
+        # Display instructions
+        console.print("[bold cyan]Next steps:[/bold cyan]")
+        console.print("1. Copy the public key above")
+        console.print("2. Submit it to the registration form at: https://chipfoundry.io/sftp-registration")
+        console.print("3. Wait for account approval")
+        console.print("4. Use 'cf config' to configure your SFTP credentials")
+        
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Failed to generate SSH key: {e}[/red]")
+        if e.stderr:
+            console.print(f"[red]Error details: {e.stderr}[/red]")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise click.Abort()
 
 @main.command('init')
 @click.option('--project-root', required=False, type=click.Path(file_okay=False), help='Directory to create the project in (defaults to current directory).')
@@ -89,10 +172,15 @@ def init(project_root):
         if (gds_dir / gds_name).exists():
             gds_type = gtype
             break
-    name = console.input("Project name: ").strip()
+    
+    # Default project name to directory name
+    default_name = Path(project_root).name
+    
+    name = console.input(f"Project name (detected: [cyan]{default_name}[/cyan]): ").strip() or default_name
+    
     # Suggest project type if detected
     if gds_type:
-        project_type = console.input(f"Project type (digital/analog/openframe) [default: {gds_type}]: ").strip() or gds_type
+        project_type = console.input(f"Project type (digital/analog/openframe) (detected: [cyan]{gds_type}[/cyan]): ").strip() or gds_type
     else:
         project_type = console.input("Project type (digital/analog/openframe): ").strip()
     version = console.input("Version (default 1.0.0): ").strip() or "1.0.0"
@@ -145,41 +233,27 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
     key_path = sftp_key
     password = sftp_password
     # Always resolve key_path to absolute path if set
-    print(f"key_path: {key_path}")
     if key_path:
-        print(f"key_path: {key_path}")
         key_path = os.path.abspath(os.path.expanduser(key_path))
     if not key_path and not password:
         if os.path.exists(DEFAULT_SSH_KEY):
             key_path = DEFAULT_SSH_KEY
-            console.print(f"[INFO] Using default SSH key: {DEFAULT_SSH_KEY}", style="bold cyan")
         else:
-            console.print("[WARN] No SFTP key or password provided, and no default key found at ~/.ssh/id_rsa.", style="bold yellow")
-            auth_method = click.prompt("Choose authentication method (key/password)", type=click.Choice(['key', 'password']), show_choices=True)
-            if auth_method == 'key':
-                key_path = click.prompt("Enter path to SFTP private key", type=click.Path(exists=True, dir_okay=False))
-            else:
-                password = click.prompt("SFTP Password", hide_input=True)
+            console.print("[yellow]No SFTP credentials found. Please run 'cf config' first.[/yellow]")
+            raise click.Abort()
     elif key_path and password:
-        console.print("[ERROR] Options --sftp-password and --sftp-key are mutually exclusive.", style="bold red")
+        console.print("[red]Options --sftp-password and --sftp-key are mutually exclusive.[/red]")
         raise click.UsageError("Options --sftp-password and --sftp-key are mutually exclusive.")
-    elif not key_path and password:
-        pass  # password provided
     elif key_path and not password:
         if not os.path.exists(key_path):
-            console.print(f"[ERROR] SFTP key file not found: {key_path}", style="bold red")
+            console.print(f"[red]SFTP key file not found: {key_path}[/red]")
             raise click.UsageError(f"SFTP key file not found: {key_path}")
 
-    console.print(f"[INFO] Collecting project files from: {project_root}", style="bold cyan")
+    # Collect project files
     try:
         collected = collect_project_files(project_root)
-        for rel_path, abs_path in collected.items():
-            if abs_path:
-                console.print(f"[OK] Found: {rel_path} -> {abs_path}", style="green")
-            else:
-                console.print(f"[INFO] Optional file not found: {rel_path}", style="yellow")
     except FileNotFoundError as e:
-        console.print(f"[ERROR] {e}", style="bold red")
+        console.print(f"[red]{e}[/red]")
         raise click.Abort()
 
     # Auto-detect project type from GDS file name if not provided
@@ -195,17 +269,18 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
         detected_type = project_type
     else:
         if len(found_types) == 0:
-            console.print("[ERROR] No recognized GDS file found for project type detection.", style="bold red")
+            console.print("[red]No recognized GDS file found for project type detection.[/red]")
             raise click.Abort()
         elif len(found_types) > 1:
-            console.print(f"[ERROR] Multiple GDS types found: {found_types}. Only one project type is allowed per project.", style="bold red")
+            console.print(f"[red]Multiple GDS types found: {found_types}. Only one project type is allowed per project.[/red]")
             raise click.Abort()
         else:
             detected_type = found_types[0]
-            console.print(f"[INFO] Detected project type: {detected_type}", style="bold cyan")
+    
     # Use the detected GDS file for upload and hash
     if gds_file_path:
         collected['gds/user_project_wrapper.gds'] = gds_file_path
+    
     # Prepare CLI overrides for project.json
     cli_overrides = {
         "project_id": project_id,
@@ -214,14 +289,12 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
         "sftp_username": sftp_username,
     }
     cf_dir = ensure_cf_directory(project_root)
-    console.print(f"[INFO] Generating/updating project.json in {cf_dir}", style="bold cyan")
     project_json_path = update_or_create_project_json(
         cf_dir=str(cf_dir),
         gds_path=collected["gds/user_project_wrapper.gds"],
         cli_overrides=cli_overrides,
         existing_json_path=collected.get(".cf/project.json")
     )
-    console.print(f"[OK] project.json ready: {project_json_path}", style="green")
 
     # SFTP upload or dry-run
     final_project_name = project_name or (
@@ -233,16 +306,16 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
         "gds/user_project_wrapper.gds": collected["gds/user_project_wrapper.gds"],
         "verilog/rtl/user_defines.v": collected["verilog/rtl/user_defines.v"],
     }
+    
     if dry_run:
-        console.print("[DRY-RUN] The following files would be uploaded:", style="bold magenta")
+        console.print("[bold]Files to upload:[/bold]")
         for rel_path, local_path in upload_map.items():
             if local_path:
                 remote_path = os.path.join(sftp_base, rel_path)
-                console.print(f"  {local_path} -> {remote_path}", style="magenta")
-        console.print("[DRY-RUN] No files were uploaded.", style="bold magenta")
+                console.print(f"  {os.path.basename(local_path)} → {rel_path}")
         return
 
-    console.print(f"[INFO] Connecting to SFTP: {sftp_host} as {sftp_username}", style="bold cyan")
+    console.print(f"Connecting to {sftp_host}...")
     transport = None
     try:
         sftp, transport = sftp_connect(
@@ -255,8 +328,9 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
         sftp_project_dir = f"incoming/projects/{final_project_name}"
         sftp_ensure_dirs(sftp, sftp_project_dir)
     except Exception as e:
-        console.print(f"[ERROR] Failed to connect to SFTP: {e}", style="bold red")
+        console.print(f"[red]Failed to connect to SFTP: {e}[/red]")
         raise click.Abort()
+    
     try:
         for rel_path, local_path in upload_map.items():
             if local_path:
@@ -267,9 +341,9 @@ def push(project_root, sftp_host, sftp_username, sftp_key, sftp_password, projec
                     remote_path=remote_path,
                     force_overwrite=force_overwrite
                 )
-        console.print(f"[SUCCESS] All files uploaded to {sftp_base}", style="bold green")
+        console.print(f"[green]✓ Uploaded to {sftp_base}[/green]")
     except Exception as e:
-        console.print(f"[ERROR] SFTP upload failed: {e}", style="bold red")
+        console.print(f"[red]Upload failed: {e}[/red]")
         raise click.Abort()
     finally:
         if transport:

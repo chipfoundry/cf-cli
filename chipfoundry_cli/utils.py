@@ -160,7 +160,7 @@ def sftp_upload_file(sftp, local_path: str, remote_path: str, force_overwrite: b
     try:
         if not force_overwrite:
             sftp.stat(remote_path)
-            print(f"[WARN] File exists on SFTP: {remote_path}. Skipping (use --force-overwrite to overwrite).")
+            print(f"File exists on SFTP: {remote_path}. Skipping (use --force-overwrite to overwrite).")
             return False
     except FileNotFoundError:
         pass  # File does not exist, proceed
@@ -173,7 +173,6 @@ def sftp_upload_file(sftp, local_path: str, remote_path: str, force_overwrite: b
             sftp.putfo(f, remote_path, callback=callback)
     else:
         sftp.put(local_path, remote_path)
-    print(f"[OK] Uploaded: {local_path} -> {remote_path}")
     return True
 
 def upload_with_progress(sftp, local_path, remote_path, force_overwrite=False):
