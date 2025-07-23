@@ -1,6 +1,6 @@
 # ChipFoundry CLI (`cf-cli`)
 
-[![PyPI version](https://badge.fury.io/py/chipfoundry-cli.svg)](https://badge.fury.io/py/chipfoundry-cli)
+[![PyPI version](https://img.shields.io/pypi/v/chipfoundry-cli?color=blue)](https://badge.fury.io/py/chipfoundry-cli)
 [![PyPI downloads](https://img.shields.io/pypi/dm/chipfoundry-cli.svg)](https://pypi.org/project/chipfoundry-cli/)
 
 A command-line tool to automate the submission of ChipFoundry projects to the SFTP server.
