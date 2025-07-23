@@ -140,6 +140,29 @@ def keygen(overwrite):
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise click.Abort()
 
+@main.command('keyview')
+def keyview():
+    """Display the current ChipFoundry SSH key."""
+    ssh_dir = Path.home() / '.ssh'
+    private_key_path = ssh_dir / 'chipfoundry-key'
+    public_key_path = ssh_dir / 'chipfoundry-key.pub'
+    
+    if not public_key_path.exists():
+        console.print("[red]No ChipFoundry SSH key found.[/red]")
+        console.print("[yellow]Run 'cf keygen' to generate a new key.[/yellow]")
+        raise click.Abort()
+    
+    console.print("[cyan]Your ChipFoundry SSH public key:[/cyan]")
+    with open(public_key_path, 'r') as f:
+        public_key = f.read().strip()
+        print(f"{public_key}")
+    print("")
+    console.print("[bold cyan]Next steps:[/bold cyan]")
+    console.print("1. Copy the public key above")
+    console.print("2. Submit it to the registration form at: https://chipfoundry.io/sftp-registration")
+    console.print("3. Wait for account approval")
+    console.print("4. Use 'cf config' to configure your SFTP credentials")
+
 @main.command('init')
 @click.option('--project-root', required=False, type=click.Path(file_okay=False), help='Directory to create the project in (defaults to current directory).')
 def init(project_root):

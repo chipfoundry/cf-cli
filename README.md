@@ -105,6 +105,16 @@ cf keygen [--overwrite]
 - Use `--overwrite` to regenerate an existing key
 - **Next step**: Submit the public key to [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
 
+### View SSH Key
+
+```bash
+cf keyview
+```
+
+- Displays the current ChipFoundry SSH public key
+- Useful for viewing your key without generating a new one
+- Shows the same registration instructions as `cf keygen`
+
 ### Configure User Credentials
 
 ```bash
