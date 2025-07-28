@@ -10,8 +10,14 @@ import toml
 
 REQUIRED_FILES = {
     ".cf/project.json": False,  # Optional, may not exist
-    "gds/user_project_wrapper.gds": True,
     "verilog/rtl/user_defines.v": True,
+}
+
+# GDS files for different project types
+GDS_TYPE_MAP = {
+    'user_project_wrapper.gds': 'digital',
+    'user_analog_project_wrapper.gds': 'analog',
+    'openframe_project_wrapper.gds': 'openframe',
 }
 
 def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
@@ -22,6 +28,8 @@ def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
     """
     project_root = Path(project_root)
     collected = {}
+    
+    # Collect standard required files
     for rel_path, required in REQUIRED_FILES.items():
         abs_path = project_root / rel_path
         if abs_path.exists():
@@ -30,6 +38,25 @@ def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
             raise FileNotFoundError(f"Required file not found: {abs_path}")
         else:
             collected[rel_path] = None
+    
+    # Collect GDS file based on what exists
+    gds_dir = project_root / 'gds'
+    if gds_dir.exists():
+        found_gds_files = []
+        for gds_name in GDS_TYPE_MAP.keys():
+            gds_path = gds_dir / gds_name
+            if gds_path.exists():
+                found_gds_files.append((gds_name, str(gds_path)))
+        
+        if len(found_gds_files) == 0:
+            raise FileNotFoundError(f"No GDS file found in {gds_dir}. Expected one of: {list(GDS_TYPE_MAP.keys())}")
+        elif len(found_gds_files) > 1:
+            found_names = [name for name, _ in found_gds_files]
+            raise FileNotFoundError(f"Multiple GDS files found: {found_names}. Only one project type is allowed per project.")
+        else:
+            gds_name, gds_path = found_gds_files[0]
+            collected[f"gds/{gds_name}"] = gds_path
+    
     return collected
 
 def ensure_cf_directory(target_dir: str):

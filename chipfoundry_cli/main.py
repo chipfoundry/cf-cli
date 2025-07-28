@@ -3,7 +3,7 @@ import getpass
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs,
-    get_config_path, load_user_config, save_user_config
+    get_config_path, load_user_config, save_user_config, GDS_TYPE_MAP
 )
 import os
 from pathlib import Path
@@ -19,12 +19,6 @@ import sys
 
 DEFAULT_SSH_KEY = os.path.expanduser('~/.ssh/chipfoundry-key')
 DEFAULT_SFTP_HOST = 'sftp.chipfoundry.io'
-
-GDS_TYPE_MAP = {
-    'user_project_wrapper.gds': 'digital',
-    'user_analog_project_wrapper.gds': 'analog',
-    'openframe_project_wrapper.gds': 'openframe',
-}
 
 console = Console()
 
@@ -186,12 +180,7 @@ def init(project_root):
     # Auto-detect project type from GDS file name
     gds_dir = Path(project_root) / 'gds'
     gds_type = None
-    gds_type_map = {
-        'user_project_wrapper.gds': 'digital',
-        'user_analog_project_wrapper.gds': 'analog',
-        'openframe_project_wrapper.gds': 'openframe',
-    }
-    for gds_name, gtype in gds_type_map.items():
+    for gds_name, gtype in GDS_TYPE_MAP.items():
         if (gds_dir / gds_name).exists():
             gds_type = gtype
             break
@@ -291,10 +280,6 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         else:
             detected_type = found_types[0]
     
-    # Use the detected GDS file for upload and hash
-    if gds_file_path:
-        collected['gds/user_project_wrapper.gds'] = gds_file_path
-    
     # Prepare CLI overrides for project.json
     cli_overrides = {
         "project_id": project_id,
@@ -303,9 +288,16 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         "sftp_username": sftp_username,
     }
     cf_dir = ensure_cf_directory(project_root)
+    
+    # Find the GDS file path for hash calculation
+    gds_path = None
+    for gds_key, gds_path in collected.items():
+        if gds_key.startswith("gds/"):
+            break
+    
     project_json_path = update_or_create_project_json(
         cf_dir=str(cf_dir),
-        gds_path=collected["gds/user_project_wrapper.gds"],
+        gds_path=gds_path,
         cli_overrides=cli_overrides,
         existing_json_path=collected.get(".cf/project.json")
     )
@@ -317,9 +309,13 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
     sftp_base = f"incoming/projects/{final_project_name}"
     upload_map = {
         ".cf/project.json": project_json_path,
-        "gds/user_project_wrapper.gds": collected["gds/user_project_wrapper.gds"],
         "verilog/rtl/user_defines.v": collected["verilog/rtl/user_defines.v"],
     }
+    
+    # Add the appropriate GDS file based on what was collected
+    for gds_key, gds_path in collected.items():
+        if gds_key.startswith("gds/"):
+            upload_map[gds_key] = gds_path
     
     if dry_run:
         console.print("[bold]Files to upload:[/bold]")
