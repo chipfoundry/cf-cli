@@ -3,13 +3,13 @@
 [![PyPI version](https://img.shields.io/pypi/v/chipfoundry-cli?color=blue)](https://badge.fury.io/py/chipfoundry-cli)
 [![PyPI downloads](https://img.shields.io/pypi/dm/chipfoundry-cli.svg)](https://pypi.org/project/chipfoundry-cli/)
 
-A command-line tool to automate the submission of ChipFoundry projects to the SFTP server.
+A command-line tool to automate the submission of ChipFoundry projects to the SFTP server and manage project results.
 
 ---
 
 ## Overview
 
-`cf-cli` is a user-friendly command-line tool for securely submitting your ChipFoundry project files to the official SFTP server. It automatically collects the required files, generates or updates your project configuration, and uploads everything to the correct location on the server.
+`cf-cli` is a user-friendly command-line tool for securely submitting your ChipFoundry project files to the official SFTP server and downloading project results. It automatically collects the required files, generates or updates your project configuration, uploads everything to the correct location on the server, and provides tools to view project results and reports.
 
 ---
 
@@ -48,6 +48,16 @@ cf --help
    cf push
    ```
 
+6. **Download results** (when available):
+   ```bash
+   cf pull
+   ```
+
+7. **View tapeout report**:
+   ```bash
+   cf view-tapeout-report
+   ```
+
 ---
 
 ## Project Structure Requirements
@@ -58,6 +68,7 @@ Your project directory **must** contain:
   - `user_project_wrapper.gds` (for digital projects)
   - `user_analog_project_wrapper.gds` (for analog projects)
   - `openframe_project_wrapper.gds` (for openframe projects)
+  - **Note**: Both compressed (`.gz`) and uncompressed (`.gds`) files are supported
 - `verilog/rtl/user_defines.v` (required for digital/analog)
 - `.cf/project.json` (optional; will be created/updated automatically)
 
@@ -156,15 +167,44 @@ cf push [OPTIONS]
 4. Uploads files to SFTP with progress bars
 5. Shows clean, informative output
 
-### Pull Results
+**GDS File Handling:**
+- **Both compressed (`.gz`) and uncompressed (`.gds`) files are supported**
+- **No automatic compression** - files are uploaded as-is
+- **Only one version allowed** - you cannot have both compressed and uncompressed versions of the same file
+- **Prefers uncompressed files** when available
+- **Falls back to compressed files** if no uncompressed version is available
+
+### Pull Results (Download)
 
 ```bash
 cf pull [--project-name NAME]
 ```
 
-- Downloads project results from SFTP
+- Downloads project results from SFTP server
 - Saves to `sftp-output/<project_name>/`
-- Shows download progress for each file
+- **Automatically updates** your local `.cf/project.json` with the pulled version
+- Creates the expected directory structure:
+  ```
+  sftp-output/
+  └── <project_name>/
+      ├── config/
+      │   └── project.json
+      └── consolidated_reports/
+          └── consolidated_report.html
+  ```
+
+### View Tapeout Report
+
+```bash
+cf view-tapeout-report [--project-name NAME] [--report-path PATH]
+```
+
+- Opens the consolidated tapeout report in your default browser
+- **Auto-detects project name** from `.cf/project.json` if available
+- Looks for report at `sftp-output/<project_name>/consolidated_reports/consolidated_report.html`
+- **Options:**
+  - `--project-name`: Specify project name manually
+  - `--report-path`: Provide direct path to HTML report file
 
 ### Check Status
 
@@ -193,6 +233,7 @@ cf status
 1. **File Collection:**
    - Checks for required GDS and Verilog files
    - Auto-detects project type (digital, analog, openframe) based on GDS file name
+   - **Supports both compressed and uncompressed GDS files**
 
 2. **Configuration:**
    - Creates or updates `.cf/project.json`
@@ -206,6 +247,26 @@ cf status
 
 4. **Success:**
    - Displays confirmation with project location
+
+---
+
+## What Happens When You Run `cf pull`?
+
+1. **Connection:**
+   - Connects to SFTP server securely
+   - Shows clean connection status
+
+2. **Download:**
+   - Downloads all project results recursively
+   - Shows professional download progress
+   - Saves to `sftp-output/<project_name>/`
+
+3. **Config Update:**
+   - **Automatically updates** your local `.cf/project.json` with the pulled version
+   - No manual steps required
+
+4. **Success:**
+   - Shows confirmation of downloaded files and updated config
 
 ---
 
@@ -234,6 +295,17 @@ cf push
 # Uploading project.json ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 # Uploading user_project_wrapper.gds ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 # ✓ Uploaded to incoming/projects/my_awesome_project
+
+# Later, download results
+cf pull
+# ✓ Connected to sftp.chipfoundry.io
+# Downloading project results from outgoing/results/my_awesome_project...
+# ✓ All files downloaded to sftp-output/my_awesome_project
+# ✓ Project config automatically updated
+
+# View the tapeout report
+cf view-tapeout-report
+# ✓ Opened tapeout report in browser: sftp-output/my_awesome_project/consolidated_reports/consolidated_report.html
 ```
 
 ### Advanced Usage
@@ -248,8 +320,31 @@ cf push --force-overwrite
 # Use different project root
 cf push --project-root /path/to/project
 
+# Pull results for specific project
+cf pull --project-name other_project
+
+# View report for specific project
+cf view-tapeout-report --project-name other_project
+
+# View custom report file
+cf view-tapeout-report --report-path /path/to/custom_report.html
+
 # Check project status
 cf status
+```
+
+### GDS File Examples
+
+```bash
+# Uncompressed GDS file (preferred)
+gds/user_project_wrapper.gds
+
+# Compressed GDS file (also supported)
+gds/user_project_wrapper.gds.gz
+
+# ❌ INVALID: Both files exist - this will cause an error
+gds/user_project_wrapper.gds      # ← Choose ONE version only
+gds/user_project_wrapper.gds.gz   # ← Remove this one
 ```
 
 ---
@@ -270,6 +365,13 @@ cf status
 
 - **Project type detection:**
   - Only one of the recognized GDS files should be present in your `gds/` directory
+  - Both compressed and uncompressed versions of the same type are supported
+  - **Important**: You cannot have both compressed (`.gz`) and uncompressed (`.gds`) versions of the same file - the tool will error out and ask you to remove one
+
+- **Report viewing errors:**
+  - Ensure you've run `cf pull` first to download the report
+  - Check that the report exists at the expected location
+  - Use `--report-path` to specify a custom report location
 
 - **ModuleNotFoundError:**
   - Upgrade the CLI: `pip install --upgrade chipfoundry-cli`

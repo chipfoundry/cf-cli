@@ -13,11 +13,14 @@ REQUIRED_FILES = {
     "verilog/rtl/user_defines.v": True,
 }
 
-# GDS files for different project types
+# GDS files for different project types (both compressed and uncompressed)
 GDS_TYPE_MAP = {
     'user_project_wrapper.gds': 'digital',
+    'user_project_wrapper.gds.gz': 'digital',
     'user_analog_project_wrapper.gds': 'analog',
+    'user_analog_project_wrapper.gds.gz': 'analog',
     'openframe_project_wrapper.gds': 'openframe',
+    'openframe_project_wrapper.gds.gz': 'openframe',
 }
 
 def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
@@ -50,12 +53,58 @@ def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
         
         if len(found_gds_files) == 0:
             raise FileNotFoundError(f"No GDS file found in {gds_dir}. Expected one of: {list(GDS_TYPE_MAP.keys())}")
-        elif len(found_gds_files) > 1:
-            found_names = [name for name, _ in found_gds_files]
-            raise FileNotFoundError(f"Multiple GDS files found: {found_names}. Only one project type is allowed per project.")
-        else:
-            gds_name, gds_path = found_gds_files[0]
-            collected[f"gds/{gds_name}"] = gds_path
+        
+        # Group by project type
+        project_type_files = {}
+        for gds_name, gds_path in found_gds_files:
+            project_type = GDS_TYPE_MAP[gds_name]
+            if project_type not in project_type_files:
+                project_type_files[project_type] = []
+            project_type_files[project_type].append((gds_name, gds_path))
+        
+        if len(project_type_files) > 1:
+            found_types = list(project_type_files.keys())
+            raise FileNotFoundError(f"Multiple project types found: {found_types}. Only one project type is allowed per project.")
+        
+        # For the single project type, check if both compressed and uncompressed versions exist
+        project_type = list(project_type_files.keys())[0]
+        type_files = project_type_files[project_type]
+        
+        # Check for both compressed and uncompressed versions of the same file
+        compressed_files = [f for f in type_files if f[0].endswith('.gz')]
+        uncompressed_files = [f for f in type_files if not f[0].endswith('.gz')]
+        
+        if len(compressed_files) > 0 and len(uncompressed_files) > 0:
+            # Find the base name without extension to show which file has both versions
+            base_names = set()
+            for gds_name, _ in type_files:
+                base_name = gds_name.replace('.gz', '')
+                base_names.add(base_name)
+            
+            if len(base_names) == 1:
+                # Same base file has both compressed and uncompressed versions
+                base_name = list(base_names)[0]
+                compressed_name = f"{base_name}.gz"
+                uncompressed_name = base_name
+                raise FileNotFoundError(
+                    f"Both compressed and uncompressed versions of the same GDS file found: "
+                    f"'{compressed_name}' and '{uncompressed_name}'. "
+                    f"Please remove one of them and keep only one version."
+                )
+        
+        # Find uncompressed file first, then fall back to compressed
+        gds_file_to_use = None
+        for gds_name, gds_path in type_files:
+            if not gds_name.endswith('.gz'):
+                gds_file_to_use = (gds_name, gds_path)
+                break
+        
+        # If no uncompressed file found, use the first available (compressed)
+        if not gds_file_to_use:
+            gds_file_to_use = type_files[0]
+        
+        gds_name, gds_path = gds_file_to_use
+        collected[f"gds/{gds_name}"] = gds_path
     
     return collected
 
@@ -220,6 +269,103 @@ def upload_with_progress(sftp, local_path, remote_path, force_overwrite=False):
         progress.update(task, completed=file_size)
         return result 
 
+
+
+def download_with_progress(sftp, remote_path, local_path, console=None):
+    """
+    Download a file with a rich progress bar.
+    """
+    try:
+        remote_stat = sftp.stat(remote_path)
+        file_size = remote_stat.st_size
+        
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.percentage:>3.0f}%"),
+            TextColumn("•"),
+            TextColumn("{task.completed}/{task.total} bytes"),
+            TimeElapsedColumn(),
+        ) as progress:
+            task = progress.add_task(f"Downloading {os.path.basename(remote_path)}", total=file_size)
+            
+            def progress_cb(bytes_transferred, total):
+                progress.update(task, completed=bytes_transferred)
+            
+            # Ensure local directory exists
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            
+            # Download file with progress
+            with open(local_path, "wb") as f:
+                def callback(bytes_transferred, total=file_size):
+                    progress_cb(bytes_transferred, total)
+                sftp.getfo(remote_path, f, callback=callback)
+            
+            progress.update(task, completed=file_size)
+            return True
+            
+    except Exception as e:
+        if console:
+            console.print(f"[red]Failed to download {os.path.basename(remote_path)}: {e}[/red]")
+        raise
+
+def sftp_download_recursive(sftp, remote_path: str, local_path: str, progress_cb=None, console=None):
+    """
+    Recursively download files and directories from SFTP server.
+    
+    Args:
+        sftp: SFTP client
+        remote_path: Remote path on SFTP server
+        local_path: Local path to save to
+        progress_cb: Optional progress callback function(bytes_transferred, total_bytes)
+        console: Optional rich console for logging
+    """
+    try:
+        # Get remote file/directory stats
+        remote_stat = sftp.stat(remote_path)
+        
+        if remote_stat.st_mode & 0o40000:  # Directory
+            # Create local directory
+            os.makedirs(local_path, exist_ok=True)
+            if console:
+                console.print(f"[dim]Creating directory: {os.path.basename(local_path)}[/dim]")
+            
+            # List contents and download recursively
+            try:
+                remote_contents = sftp.listdir(remote_path)
+                if console:
+                    console.print(f"[dim]Found {len(remote_contents)} items in {os.path.basename(remote_path)}[/dim]")
+                for item in remote_contents:
+                    remote_item_path = f"{remote_path}/{item}"
+                    local_item_path = os.path.join(local_path, item)
+                    sftp_download_recursive(sftp, remote_item_path, local_item_path, progress_cb, console)
+            except Exception as e:
+                if console:
+                    console.print(f"[yellow]Warning: Could not list directory {os.path.basename(remote_path)}: {e}[/yellow]")
+                
+        else:  # File
+            # Ensure local directory exists
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            
+            if console:
+                console.print(f"[dim]Downloading: {os.path.basename(remote_path)} ({remote_stat.st_size:,} bytes)[/dim]")
+            
+            # Download file with progress if callback provided
+            if progress_cb:
+                file_size = remote_stat.st_size
+                with open(local_path, "wb") as f:
+                    def callback(bytes_transferred, total=file_size):
+                        progress_cb(bytes_transferred, total)
+                    sftp.getfo(remote_path, f, callback=callback)
+            else:
+                sftp.get(remote_path, local_path)
+                
+    except Exception as e:
+        if console:
+            console.print(f"[red]Error downloading {os.path.basename(remote_path)}: {e}[/red]")
+        raise
+
 def get_config_path() -> Path:
     return Path.home() / ".chipfoundry-cli" / "config.toml"
 
@@ -233,4 +379,21 @@ def save_user_config(config: dict):
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, 'w') as f:
-        toml.dump(config, f) 
+        toml.dump(config, f)
+
+def open_html_in_browser(html_path: str):
+    """
+    Open an HTML file in the default browser.
+    
+    Args:
+        html_path: Path to the HTML file to open
+    """
+    import webbrowser
+    import urllib.parse
+    
+    # Convert to absolute path and file URL
+    abs_path = os.path.abspath(html_path)
+    file_url = f"file://{urllib.parse.quote(abs_path)}"
+    
+    # Open in default browser
+    webbrowser.open(file_url) 

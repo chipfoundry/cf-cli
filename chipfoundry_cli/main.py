@@ -2,8 +2,9 @@ import click
 import getpass
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
-    sftp_connect, upload_with_progress, sftp_ensure_dirs,
-    get_config_path, load_user_config, save_user_config, GDS_TYPE_MAP
+    sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
+    get_config_path, load_user_config, save_user_config, GDS_TYPE_MAP,
+    open_html_in_browser, download_with_progress
 )
 import os
 from pathlib import Path
@@ -268,6 +269,10 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         if candidate.exists():
             found_types.append(gds_type)
             gds_file_path = str(candidate)
+    
+    # Remove duplicates (compressed and uncompressed files of same type)
+    found_types = list(set(found_types))
+    
     if project_type:
         detected_type = project_type
     else:
@@ -351,6 +356,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
                     force_overwrite=force_overwrite
                 )
         console.print(f"[green]✓ Uploaded to {sftp_base}[/green]")
+        
     except Exception as e:
         console.print(f"[red]Upload failed: {e}[/red]")
         raise click.Abort()
@@ -374,11 +380,13 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
     if not project_name:
         console.print("[bold red]No project name specified and no .cf/project.json found in current directory. Please provide --project-name.[/bold red]")
         raise click.Abort()
+    
+    # Load user config for defaults
     config = load_user_config()
     if not sftp_username:
         sftp_username = config.get("sftp_username")
         if not sftp_username:
-            console.print("[bold red]No SFTP username provided and not found in config. Please run 'chipfoundry config' or provide --sftp-username.[/bold red]")
+            console.print("[bold red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/bold red]")
             raise click.Abort()
     if not sftp_key:
         sftp_key = config.get("sftp_key")
@@ -394,7 +402,8 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
         console.print("[yellow]Please run 'cf keygen' to generate a key or 'cf config' to set a custom key path.[/yellow]")
         raise click.Abort()
 
-    console.print(f"Connecting to {sftp_host}...")
+    # Connect to SFTP
+    console.print(f"[cyan]Connecting to {sftp_host}...[/cyan]")
     transport = None
     try:
         sftp, transport = sftp_connect(
@@ -402,48 +411,57 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
             username=sftp_username,
             key_path=key_path
         )
+        console.print(f"[green]✓ Connected to {sftp_host}[/green]")
     except Exception as e:
         console.print(f"[red]Failed to connect to SFTP: {e}[/red]")
         raise click.Abort()
+    
     try:
         remote_dir = f"outgoing/results/{project_name}"
         output_dir = os.path.join(os.getcwd(), "sftp-output", project_name)
-        os.makedirs(output_dir, exist_ok=True)
+        
+        # Check if remote directory exists
         try:
-            files = sftp.listdir(remote_dir)
+            sftp.stat(remote_dir)
         except Exception:
             console.print(f"[yellow]No results found for project '{project_name}' on SFTP server.[/yellow]")
             return
-        if not files:
-            console.print(f"[yellow]No files to download for project '{project_name}'.[/yellow]")
-            return
-        with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("{task.percentage:>3.0f}%"),
-            TextColumn("•"),
-            TextColumn("{task.completed}/{task.total} bytes"),
-            TimeElapsedColumn(),
-        ) as progress:
-            for fname in files:
-                remote_path = f"{remote_dir}/{fname}"
-                local_path = os.path.join(output_dir, fname)
+        
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Download with progress tracking
+        console.print(f"[bold cyan]Downloading project results from {remote_dir}...[/bold cyan]")
+        
+        try:
+            # Use recursive download function with console for clean logging
+            sftp_download_recursive(sftp, remote_dir, output_dir, console=console)
+            console.print(f"[green]✓ All files downloaded to {output_dir}[/green]")
+            
+            # Automatically update local project config if available
+            pulled_config_path = os.path.join(output_dir, "config", "project.json")
+            if os.path.exists(pulled_config_path):
+                local_config_path = os.path.join(".cf", "project.json")
+                os.makedirs(".cf", exist_ok=True)
+                
                 try:
-                    file_size = sftp.stat(remote_path).st_size
-                    task = progress.add_task(f"Downloading {fname}", total=file_size)
-                    with open(local_path, "wb") as f:
-                        def callback(bytes_transferred, total=file_size):
-                            progress.update(task, completed=bytes_transferred)
-                        sftp.getfo(remote_path, f, callback=callback)
-                    progress.update(task, completed=file_size)
+                    import shutil
+                    shutil.copy2(pulled_config_path, local_config_path)
+                    console.print(f"[green]✓ Project config automatically updated[/green]")
                 except Exception as e:
-                    console.print(f"[red]Failed to download {fname}: {e}[/red]")
-        console.print(f"[green]All files downloaded to {output_dir}[/green]")
+                    console.print(f"[yellow]Warning: Failed to update project config: {e}[/yellow]")
+            else:
+                console.print(f"[dim]Note: No project config found in pulled results[/dim]")
+                
+        except Exception as e:
+            console.print(f"[red]Failed to download project results: {e}[/red]")
+            raise click.Abort()
+            
     finally:
         if transport:
             sftp.close()
             transport.close()
+            console.print(f"[dim]Disconnected from {sftp_host}[/dim]")
 
 @main.command('status')
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
@@ -483,11 +501,15 @@ def status(sftp_host, sftp_username, sftp_key):
         console.print(f"[red]Failed to connect to SFTP: {e}[/red]")
         raise click.Abort()
     try:
-        # List projects in incoming/projects/ and outgoing/results/
+        # List projects in incoming/projects/, outgoing/results/, and archive/
         incoming_projects_dir = f"incoming/projects"
         outgoing_results_dir = f"outgoing/results"
+        archive_dir = f"archive"
+        
         projects = []
         results = []
+        archived_projects = []
+        
         try:
             projects = sftp.listdir(incoming_projects_dir)
         except Exception:
@@ -496,23 +518,257 @@ def status(sftp_host, sftp_username, sftp_key):
             results = sftp.listdir(outgoing_results_dir)
         except Exception:
             pass
+        try:
+            archived_items = sftp.listdir(archive_dir)
+            # Filter for project directories and parse timestamps
+            for item in archived_items:
+                if '_' in item and len(item.split('_')) >= 3:
+                    # Try to parse timestamp from format like "serial_example_20250813_150354"
+                    parts = item.split('_')
+                    if len(parts) >= 3:
+                        # Check if the last two parts look like date and time
+                        date_part = parts[-2]
+                        time_part = parts[-1]
+                        if len(date_part) == 8 and len(time_part) == 6 and date_part.isdigit() and time_part.isdigit():
+                            # This looks like a timestamped archive
+                            project_name = '_'.join(parts[:-2])  # Everything except date and time
+                            timestamp_str = f"{date_part}_{time_part}"
+                            archived_projects.append((project_name, timestamp_str, item))
+        except Exception:
+            pass
+        
+        # Create main status table
         table = Table(title=f"SFTP Status for {sftp_username}")
         table.add_column("Project Name", style="cyan", no_wrap=True)
         table.add_column("Has Input", style="yellow")
         table.add_column("Has Output", style="green")
-        all_projects = set(projects) | set(results)
-        for proj in sorted(all_projects):
-            has_input = "Yes" if proj in projects else "No"
-            has_output = "Yes" if proj in results else "No"
-            table.add_row(proj, has_input, has_output)
-        if all_projects:
+        table.add_column("Last Tapeout Run", style="blue")
+        
+        # Find the most recent archived project (latest tapeout)
+        latest_tapeout = None
+        if archived_projects:
+            # Sort by timestamp to find the most recent
+            archived_projects.sort(key=lambda x: x[1], reverse=True)  # Sort by timestamp descending
+            latest_tapeout = archived_projects[0]
+            
+            # Parse timestamp to human-readable format
+            try:
+                # timestamp format is "20250813_150354"
+                date_part, time_part = latest_tapeout[1].split('_')
+                year = date_part[:4]
+                month = date_part[4:6]
+                day = date_part[6:8]
+                hour = time_part[:2]
+                minute = time_part[2:4]
+                second = time_part[4:6]
+                
+                formatted_time = f"{year}-{month}-{day} {hour}:{minute}:{second}"
+            except:
+                formatted_time = latest_tapeout[1]
+            
+            # Show only the latest tapeout run
+            # Check if this project has input and output files
+            has_input = "Yes" if latest_tapeout[0] in projects else "No"
+            has_output = "Yes" if latest_tapeout[0] in results else "No"
+            table.add_row(latest_tapeout[0], has_input, has_output, formatted_time)
+        else:
+            # No tapeout runs yet, show active projects with their status
+            all_projects = set(projects) | set(results)
+            for proj in sorted(all_projects):
+                has_input = "Yes" if proj in projects else "No"
+                has_output = "Yes" if proj in results else "No"
+                last_tapeout = "No tapeout yet"
+                table.add_row(proj, has_input, has_output, last_tapeout)
+        
+        if table.row_count > 0:
             console.print(table)
         else:
             console.print("[yellow]No projects or results found on SFTP server.[/yellow]")
+            
+        # Add informative message about tapeout status
+        if not archived_projects and all_projects:
+            console.print("\n[cyan]Note: No tapeout runs have started yet. Your projects are waiting in the queue.[/cyan]")
+        elif not archived_projects and not all_projects:
+            console.print("\n[cyan]Note: No projects found and no tapeout runs have started yet.[/cyan]")
     finally:
         if transport:
             sftp.close()
             transport.close()
+
+@main.command('tapeout-history')
+@click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
+@click.option('--sftp-username', required=False, help='SFTP username (defaults to config).')
+@click.option('--sftp-key', type=click.Path(exists=True, dir_okay=False), help='Path to SFTP private key file (defaults to config).', default=None, show_default=False)
+@click.option('--limit', default=50, help='Maximum number of tapeouts to show (default: 50)')
+@click.option('--days', default=None, help='Show tapeouts from last N days only')
+def tapeouts(sftp_host, sftp_username, sftp_key, limit, days):
+    """Show all tapeout runs (archived projects) with their timestamps."""
+    config = load_user_config()
+    if not sftp_username:
+        sftp_username = config.get("sftp_username")
+        if not sftp_username:
+            console.print("[red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/red]")
+            raise click.Abort()
+    if not sftp_key:
+        sftp_key = config.get("sftp_key")
+    
+    # Always resolve key_path to absolute path if set
+    if sftp_key:
+        key_path = os.path.abspath(os.path.expanduser(sftp_key))
+    else:
+        key_path = DEFAULT_SSH_KEY
+    
+    if not os.path.exists(key_path):
+        console.print(f"[red]SFTP key file not found: {key_path}[/red]")
+        console.print("[yellow]Please run 'cf keygen' to generate a key or 'cf config' to set a custom key path.[/yellow]")
+        raise click.Abort()
+
+    console.print(f"Connecting to {sftp_host}...")
+    transport = None
+    try:
+        sftp, transport = sftp_connect(
+            host=sftp_host,
+            username=sftp_username,
+            key_path=key_path
+        )
+    except Exception as e:
+        console.print(f"[red]Failed to connect to SFTP: {e}[/red]")
+        raise click.Abort()
+    
+    try:
+        # List archived projects
+        archive_dir = f"archive"
+        archived_projects = []
+        
+        try:
+            archived_items = sftp.listdir(archive_dir)
+            # Filter for project directories and parse timestamps
+            for item in archived_items:
+                if '_' in item and len(item.split('_')) >= 3:
+                    # Try to parse timestamp from format like "serial_example_20250813_150354"
+                    parts = item.split('_')
+                    if len(parts) >= 3:
+                        # Check if the last two parts look like date and time
+                        date_part = parts[-2]
+                        time_part = parts[-1]
+                        if len(date_part) == 8 and len(time_part) == 6 and date_part.isdigit() and time_part.isdigit():
+                            # This looks like a timestamped archive
+                            project_name = '_'.join(parts[:-2])  # Everything except date and time
+                            timestamp_str = f"{date_part}_{time_part}"
+                            archived_projects.append((project_name, timestamp_str, item))
+        except Exception as e:
+            console.print(f"[yellow]Could not access archive directory: {e}[/yellow]")
+            return
+        
+        if not archived_projects:
+            console.print("[yellow]No tapeout runs found in archive.[/yellow]")
+            return
+        
+        # Sort by timestamp (most recent first)
+        archived_projects.sort(key=lambda x: x[1], reverse=True)
+        
+        # Apply day filter if specified
+        if days:
+            from datetime import datetime, timedelta
+            cutoff_date = datetime.now() - timedelta(days=days)
+            filtered_projects = []
+            for proj_name, timestamp, archive_path in archived_projects:
+                try:
+                    date_part, time_part = timestamp.split('_')
+                    year = int(date_part[:4])
+                    month = int(date_part[4:6])
+                    day = int(date_part[6:8])
+                    hour = int(time_part[:2])
+                    minute = int(time_part[2:4])
+                    second = int(time_part[4:6])
+                    
+                    archive_datetime = datetime(year, month, day, hour, minute, second)
+                    if archive_datetime >= cutoff_date:
+                        filtered_projects.append((proj_name, timestamp, archive_path))
+                except:
+                    # If parsing fails, include it anyway
+                    filtered_projects.append((proj_name, timestamp, archive_path))
+            
+            archived_projects = filtered_projects
+            if archived_projects:
+                console.print(f"[cyan]Showing tapeouts from last {days} days[/cyan]")
+        
+        # Apply limit
+        if len(archived_projects) > limit:
+            console.print(f"[cyan]Showing {limit} most recent tapeouts (use --limit to see more)[/cyan]")
+            archived_projects = archived_projects[:limit]
+        
+        # Create tapeout history table
+        table = Table(title=f"Tapeout History for {sftp_username}")
+        table.add_column("Project Name", style="cyan", no_wrap=True)
+        table.add_column("Tapeout Started", style="green")
+        
+        for proj_name, timestamp, archive_path in archived_projects:
+            # Parse timestamp to human-readable format
+            try:
+                # timestamp format is "20250813_150354"
+                date_part, time_part = timestamp.split('_')
+                year = date_part[:4]
+                month = date_part[4:6]
+                day = date_part[6:8]
+                hour = time_part[:2]
+                minute = time_part[2:4]
+                second = time_part[4:6]
+                
+                formatted_time = f"{year}-{month}-{day} {hour}:{minute}:{second}"
+            except:
+                formatted_time = timestamp
+            
+            table.add_row(proj_name, formatted_time)
+        
+        console.print(table)
+        
+        # Show summary
+        total_archived = len(archived_projects)
+        if total_archived > 0:
+            console.print(f"\n[cyan]Total tapeouts shown: {total_archived}[/cyan]")
+    
+    finally:
+        if transport:
+            sftp.close()
+            transport.close()
+
+@main.command("view-tapeout-report")
+@click.option("--project-name", required=False, help="Project name to view tapeout report for (defaults to value in .cf/project.json if present).")
+@click.option("--report-path", type=click.Path(exists=True, file_okay=True, dir_okay=False), help="Direct path to the HTML report file.")
+def view_tapeout_report(project_name, report_path):
+    """View the consolidated tapeout report from the pulled sftp-output directory."""
+    if report_path:
+        # Use the directly specified report path
+        html_path = report_path
+    else:
+        # Try to find the report based on project name
+        if not project_name:
+            # Try to get project name from .cf/project.json
+            _, cwd_project_name = get_project_json_from_cwd()
+            if cwd_project_name:
+                project_name = cwd_project_name
+            else:
+                console.print("[bold red]No project name specified and no .cf/project.json found in current directory. Please provide --project-name or --report-path.[/bold red]")
+                raise click.Abort()
+        
+        # Look for the consolidated report in the expected location
+        expected_report_path = os.path.join("sftp-output", project_name, "consolidated_reports", "consolidated_report.html")
+        
+        if not os.path.exists(expected_report_path):
+            console.print(f"[yellow]Tapeout report not found at expected location: {expected_report_path}[/yellow]")
+            console.print(f"[cyan]Try running 'cf pull --project-name {project_name}' first to download the report.[/cyan]")
+            raise click.Abort()
+        
+        html_path = expected_report_path
+    
+    # Open the HTML report in the default browser
+    try:
+        open_html_in_browser(html_path)
+        console.print(f"[green]Opened tapeout report in browser: {html_path}[/green]")
+    except Exception as e:
+        console.print(f"[red]Failed to open tapeout report in browser: {e}[/red]")
+        raise click.Abort()
 
 if __name__ == "__main__":
     main() 
