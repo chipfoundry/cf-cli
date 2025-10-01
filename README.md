@@ -256,7 +256,7 @@ cf repo update [OPTIONS]
 - `--project-root`: Specify project directory (defaults to current directory)
 - `--repo-owner`: GitHub repository owner (default: chipfoundry)
 - `--repo-name`: GitHub repository name (default: caravel_user_project)
-- `--branch`: Branch name containing the repo.json file (default: cli-update)
+- `--branch`: Branch name containing the repo.json file (default: main)
 - `--dry-run`: Preview changes without updating files
 
 **What happens:**

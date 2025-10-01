@@ -891,7 +891,7 @@ def repo_group():
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--repo-owner', default='chipfoundry', help='GitHub repository owner (default: chipfoundry)')
 @click.option('--repo-name', default='caravel_user_project', help='GitHub repository name (default: caravel_user_project)')
-@click.option('--branch', default='cli-update', help='Branch name containing the repo.json file (default: cli-update)')
+@click.option('--branch', default='main', help='Branch name containing the repo.json file (default: main)')
 @click.option('--dry-run', is_flag=True, help='Preview changes without updating files')
 def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
     """Update local repository files from upstream GitHub repository based on .cf/repo.json changes list."""

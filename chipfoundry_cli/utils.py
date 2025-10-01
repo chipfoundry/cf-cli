@@ -473,7 +473,7 @@ def download_github_file(repo_owner: str, repo_name: str, file_path: str, local_
     except Exception:
         return False
 
-def update_repo_files(project_root: str, repo_owner: str = "chipfoundry", repo_name: str = "caravel_user_project", branch: str = "cli-update") -> Dict[str, bool]:
+def update_repo_files(project_root: str, repo_owner: str = "chipfoundry", repo_name: str = "caravel_user_project", branch: str = "main") -> Dict[str, bool]:
     """
     Update local repository files based on the repo.json changes list.
     
