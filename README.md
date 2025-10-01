@@ -58,6 +58,11 @@ cf --help
    cf view-tapeout-report
    ```
 
+8. **Confirm final tapeout** (when ready to send GDS to foundry):
+   ```bash
+   cf confirm
+   ```
+
 ---
 
 ## Project Structure Requirements
@@ -71,6 +76,7 @@ Your project directory **must** contain:
   - **Note**: Both compressed (`.gz`) and uncompressed (`.gds`) files are supported
 - `verilog/rtl/user_defines.v` (required for digital/analog)
 - `.cf/project.json` (optional; will be created/updated automatically)
+  - Contains project metadata including `submission_state` ("Draft" or "Final")
 
 **Example:**
 ```
@@ -193,6 +199,23 @@ cf pull [--project-name NAME]
           └── consolidated_report.html
   ```
 
+### Confirm Final Tapeout
+
+```bash
+cf confirm [OPTIONS]
+```
+
+- **Confirms your final tapeout** by setting `submission_state` to "Final"
+- **Uploads only the project.json** to the SFTP server (not the entire project)
+- **Use this when you're ready to send your current GDS file to the foundry** for tapeout processing
+- **Options:**
+  - `--project-root`: Specify project directory
+  - `--project-name`: Override project name
+  - `--sftp-username`: Override configured username
+  - `--sftp-key`: Override configured key path
+
+**Important:** This command confirms that your current GDS file is ready to be sent to the foundry for tapeout. Only run this when you are completely satisfied with your design and ready for final tapeout processing. This action cannot be easily undone.
+
 ### View Tapeout Report
 
 ```bash
@@ -215,6 +238,47 @@ cf status
 - Lists all your projects on the SFTP server
 - Shows which projects have input files and/or results
 - Displays project status in a clean table format
+
+---
+
+## Submission Workflow and States
+
+The CLI tracks your project submission state through the `submission_state` field in `project.json`:
+
+### Project States
+
+- **"Draft"** - Initial state when you run `cf init`
+  - Project is ready for development and testing
+  - You can push updates multiple times
+  - Project is not yet ready for tapeout processing
+
+- **"Final"** - Confirmed state when you run `cf confirm`
+  - GDS file is ready to be sent to the foundry for tapeout
+  - No further changes should be made to the design
+  - Only the project.json is uploaded (not the full project)
+
+### Recommended Workflow
+
+1. **Development Phase:**
+   ```bash
+   cf init          # Creates project with submission_state: "Draft"
+   cf push          # Upload project files (state remains "Draft")
+   # ... make changes to your project ...
+   cf push          # Upload updated files (state remains "Draft")
+   ```
+
+2. **Review Phase (Optional):**
+   ```bash
+   cf pull          # Download results for review (if available)
+   cf view-tapeout-report  # Review the tapeout report (if available)
+   ```
+
+3. **Final Tapeout Confirmation:**
+   ```bash
+   cf confirm       # Confirm current GDS file is ready for foundry tapeout
+   ```
+
+**Important:** Only run `cf confirm` when you are completely satisfied with your GDS file and ready to send it to the foundry for tapeout processing. This action cannot be easily undone.
 
 ---
 
@@ -303,9 +367,15 @@ cf pull
 # ✓ All files downloaded to sftp-output/my_awesome_project
 # ✓ Project config automatically updated
 
-# View the tapeout report
+# Review the tapeout report (if available)
 cf view-tapeout-report
 # ✓ Opened tapeout report in browser: sftp-output/my_awesome_project/consolidated_reports/consolidated_report.html
+
+# When ready, confirm final tapeout (sends GDS to foundry)
+cf confirm
+# ✓ Updated project.json with submission_state = Final
+# ✓ Confirmed project submission: my_awesome_project
+# ✓ Uploaded project.json to incoming/projects/my_awesome_project/.cf/project.json
 ```
 
 ### Advanced Usage
@@ -325,6 +395,9 @@ cf pull --project-name other_project
 
 # View report for specific project
 cf view-tapeout-report --project-name other_project
+
+# Confirm final tapeout for specific project
+cf confirm --project-name other_project
 
 # View custom report file
 cf view-tapeout-report --report-path /path/to/custom_report.html

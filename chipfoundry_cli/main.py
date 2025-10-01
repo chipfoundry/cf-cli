@@ -196,7 +196,7 @@ def init(project_root):
         project_type = console.input(f"Project type (digital/analog/openframe) (detected: [cyan]{gds_type}[/cyan]): ").strip() or gds_type
     else:
         project_type = console.input("Project type (digital/analog/openframe): ").strip()
-    version = console.input("Version (default 1.0.0): ").strip() or "1.0.0"
+    version = "1"  # Start with version 1, will be auto-incremented on push
     # No hash yet, will be filled by push
     data = {
         "project": {
@@ -204,7 +204,8 @@ def init(project_root):
             "type": project_type,
             "user": username,
             "version": version,
-            "user_project_wrapper_hash": ""
+            "user_project_wrapper_hash": "",
+            "submission_state": "Draft"
         }
     }
     with open(project_json_path, 'w') as f:
@@ -769,6 +770,117 @@ def view_tapeout_report(project_name, report_path):
     except Exception as e:
         console.print(f"[red]Failed to open tapeout report in browser: {e}[/red]")
         raise click.Abort()
+
+@main.command('confirm')
+@click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
+@click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
+@click.option('--sftp-username', required=False, help='SFTP username (defaults to config).')
+@click.option('--sftp-key', type=click.Path(exists=True, dir_okay=False), help='Path to SFTP private key file (defaults to config).', default=None, show_default=False)
+@click.option('--project-name', help='Project name (e.g., "my_project"). Overrides project.json if exists.')
+def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
+    """Confirm project submission by setting submission_state to Final and pushing project.json to SFTP."""
+    # If .cf/project.json exists in cwd, use it as default project_root and project_name
+    cwd_root, cwd_project_name = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_name and cwd_project_name:
+        project_name = cwd_project_name
+    if not project_root:
+        console.print("[bold red]No project root specified and no .cf/project.json found in current directory. Please provide --project-root.[/bold red]")
+        raise click.Abort()
+    
+    # Load user config for defaults
+    config = load_user_config()
+    if not sftp_username:
+        sftp_username = config.get("sftp_username")
+        if not sftp_username:
+            console.print("[bold red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/bold red]")
+            raise click.Abort()
+    if not sftp_key:
+        sftp_key = config.get("sftp_key")
+    
+    # Always resolve key_path to absolute path if set
+    if sftp_key:
+        key_path = os.path.abspath(os.path.expanduser(sftp_key))
+    else:
+        key_path = DEFAULT_SSH_KEY
+    
+    if not os.path.exists(key_path):
+        console.print(f"[red]SFTP key file not found: {key_path}[/red]")
+        console.print("[yellow]Please run 'cf keygen' to generate a key or 'cf config' to set a custom key path.[/yellow]")
+        raise click.Abort()
+
+    # Load and update project.json
+    project_json_path = Path(project_root) / '.cf' / 'project.json'
+    if not project_json_path.exists():
+        console.print(f"[red]Project configuration not found at {project_json_path}[/red]")
+        console.print("[yellow]Please run 'cf init' first to initialize your project.[/yellow]")
+        raise click.Abort()
+    
+    # Load existing project.json
+    try:
+        with open(project_json_path, 'r') as f:
+            project_data = json.load(f)
+    except Exception as e:
+        console.print(f"[red]Failed to read project.json: {e}[/red]")
+        raise click.Abort()
+    
+    # Set submission_state to Final
+    if "project" not in project_data:
+        project_data["project"] = {}
+    
+    project_data["project"]["submission_state"] = "Final"
+    
+    # Save updated project.json
+    try:
+        with open(project_json_path, 'w') as f:
+            json.dump(project_data, f, indent=2)
+        console.print("[green]✓ Updated project.json with submission_state = Final[/green]")
+    except Exception as e:
+        console.print(f"[red]Failed to update project.json: {e}[/red]")
+        raise click.Abort()
+    
+    # Get final project name for SFTP upload
+    final_project_name = project_name or project_data.get("project", {}).get("name")
+    if not final_project_name:
+        console.print("[red]No project name found in project.json. Please provide --project-name.[/red]")
+        raise click.Abort()
+    
+    # Connect to SFTP and upload project.json
+    console.print(f"Connecting to {sftp_host}...")
+    transport = None
+    try:
+        sftp, transport = sftp_connect(
+            host=sftp_host,
+            username=sftp_username,
+            key_path=key_path
+        )
+        # Ensure the project directory exists before uploading
+        sftp_project_dir = f"incoming/projects/{final_project_name}"
+        sftp_ensure_dirs(sftp, sftp_project_dir)
+    except Exception as e:
+        console.print(f"[red]Failed to connect to SFTP: {e}[/red]")
+        raise click.Abort()
+    
+    try:
+        # Upload only the project.json file
+        remote_path = os.path.join(sftp_project_dir, ".cf", "project.json")
+        upload_with_progress(
+            sftp,
+            local_path=str(project_json_path),
+            remote_path=remote_path,
+            force_overwrite=True  # Always overwrite for confirmation
+        )
+        console.print(f"[green]✓ Confirmed project submission: {final_project_name}[/green]")
+        console.print(f"[green]✓ Uploaded project.json to {remote_path}[/green]")
+        
+    except Exception as e:
+        console.print(f"[red]Upload failed: {e}[/red]")
+        raise click.Abort()
+    finally:
+        if transport:
+            sftp.close()
+            transport.close()
 
 if __name__ == "__main__":
     main() 

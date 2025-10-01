@@ -158,7 +158,7 @@ def update_or_create_project_json(
 ) -> str:
     """
     Update or create project.json in cf_dir. If existing_json_path is given, load and update it.
-    Otherwise, create a new one. Always update the user_project_wrapper_hash.
+    Otherwise, create a new one. Always update the user_project_wrapper_hash and auto-increment version.
     Returns the path to the updated/created project.json.
     """
     project_json_path = str(Path(cf_dir) / "project.json")
@@ -169,14 +169,37 @@ def update_or_create_project_json(
             data["project"] = {}
     else:
         data = {"project": {}}
+    
+    # Handle version auto-increment only if GDS hash changed
+    current_version = data["project"].get("version")
+    current_hash = data["project"].get("user_project_wrapper_hash", "")
+    
+    if current_version is None:
+        # No existing version, start with 1
+        new_version = "1"
+    elif current_hash != hash_val:
+        # GDS hash changed, increment version
+        try:
+            # Convert to int, increment, and convert back to string
+            version_num = int(current_version)
+            new_version = str(version_num + 1)
+        except (ValueError, TypeError):
+            # If version is not a valid integer, start from 1
+            new_version = "1"
+    else:
+        # GDS hash unchanged, keep same version
+        new_version = current_version
+    
     # Required fields with defaults
-    data["project"].setdefault("version", "1.0.0")
+    data["project"]["version"] = new_version
     data["project"]["user_project_wrapper_hash"] = hash_val
-    # Apply CLI overrides
-    for key in ["id", "name", "type", "user", "version"]:
+    
+    # Apply CLI overrides (but don't override auto-incremented version)
+    for key in ["id", "name", "type", "user"]:  # Removed "version" from CLI overrides
         cli_key = f"project_{key}" if key != "user" else "sftp_username"
         if cli_key in cli_overrides and cli_overrides[cli_key] is not None:
             data["project"][key] = cli_overrides[cli_key]
+    
     save_project_json(project_json_path, data)
     return project_json_path 
 
