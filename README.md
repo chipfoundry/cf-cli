@@ -239,6 +239,61 @@ cf status
 - Shows which projects have input files and/or results
 - Displays project status in a clean table format
 
+### Repository Management
+
+#### Update Repository Files
+
+```bash
+cf repo update [OPTIONS]
+```
+
+- **Updates local project files** from the upstream GitHub repository
+- **Fetches configuration** from `.cf/repo.json` in the specified repository and branch
+- **Downloads and overwrites** local files based on the changes list in the configuration
+- **Saves configuration** locally to `.cf/repo.json` for reference
+
+**Options:**
+- `--project-root`: Specify project directory (defaults to current directory)
+- `--repo-owner`: GitHub repository owner (default: chipfoundry)
+- `--repo-name`: GitHub repository name (default: caravel_user_project)
+- `--branch`: Branch name containing the repo.json file (default: cli-update)
+- `--dry-run`: Preview changes without updating files
+
+**What happens:**
+1. Fetches `.cf/repo.json` from the specified GitHub repository and branch
+2. Downloads and saves the configuration file locally to `.cf/repo.json`
+3. Downloads and overwrites each file listed in the `changes` array
+4. Provides detailed feedback on success/failure of each file update
+
+**Example:**
+```bash
+# Preview what would be updated
+cf repo update --dry-run
+# Output:
+# Files that would be updated:
+#   • .cf/repo.json (configuration file)
+#   • README.md
+#   • Makefile
+#   • openlane/Makefile
+
+# Update files from upstream
+cf repo update
+# Output:
+# Update results:
+# ✓ Updated: .cf/repo.json
+# ✓ Updated: README.md
+# ✓ Updated: Makefile
+# ✓ Updated: openlane/Makefile
+# Successfully updated 4 file(s)
+# All files updated successfully!
+```
+
+**Use cases:**
+- Keep your project up-to-date with upstream changes
+- Apply bug fixes and improvements from the template repository
+- Sync configuration changes from the upstream project
+- Maintain consistency with the latest project structure
+
 ---
 
 ## Submission Workflow and States
@@ -445,6 +500,12 @@ gds/user_project_wrapper.gds.gz   # ← Remove this one
   - Ensure you've run `cf pull` first to download the report
   - Check that the report exists at the expected location
   - Use `--report-path` to specify a custom report location
+
+- **Repository update errors:**
+  - Check your internet connection
+  - Verify the repository and branch exist
+  - Use `--dry-run` to preview changes before applying them
+  - Check that the `.cf/repo.json` file exists in the upstream repository
 
 - **ModuleNotFoundError:**
   - Upgrade the CLI: `pip install --upgrade chipfoundry-cli`

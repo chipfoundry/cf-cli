@@ -7,6 +7,7 @@ import hashlib
 import paramiko
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TaskProgressColumn
 import toml
+import httpx
 
 REQUIRED_FILES = {
     ".cf/project.json": False,  # Optional, may not exist
@@ -419,4 +420,97 @@ def open_html_in_browser(html_path: str):
     file_url = f"file://{urllib.parse.quote(abs_path)}"
     
     # Open in default browser
-    webbrowser.open(file_url) 
+    webbrowser.open(file_url)
+
+def fetch_github_file(repo_owner: str, repo_name: str, file_path: str, branch: str = "main") -> str:
+    """
+    Fetch a file from a GitHub repository using the GitHub API.
+    
+    Args:
+        repo_owner: GitHub repository owner (e.g., "chipfoundry")
+        repo_name: GitHub repository name (e.g., "caravel_user_project")
+        file_path: Path to the file in the repository (e.g., ".cf/repo.json")
+        branch: Branch name (default: "main")
+    
+    Returns:
+        File content as string
+    
+    Raises:
+        httpx.HTTPError: If the request fails
+    """
+    url = f"https://raw.githubusercontent.com/{repo_owner}/{repo_name}/{branch}/{file_path}"
+    
+    with httpx.Client() as client:
+        response = client.get(url)
+        response.raise_for_status()
+        return response.text
+
+def download_github_file(repo_owner: str, repo_name: str, file_path: str, local_path: str, branch: str = "main") -> bool:
+    """
+    Download a file from a GitHub repository and save it locally.
+    
+    Args:
+        repo_owner: GitHub repository owner
+        repo_name: GitHub repository name
+        file_path: Path to the file in the repository
+        local_path: Local path to save the file
+        branch: Branch name (default: "main")
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        content = fetch_github_file(repo_owner, repo_name, file_path, branch)
+        
+        # Ensure the local directory exists
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        
+        # Write the content to the local file
+        with open(local_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        return True
+    except Exception:
+        return False
+
+def update_repo_files(project_root: str, repo_owner: str = "chipfoundry", repo_name: str = "caravel_user_project", branch: str = "cli-update") -> Dict[str, bool]:
+    """
+    Update local repository files based on the repo.json changes list.
+    
+    Args:
+        project_root: Local project root directory
+        repo_owner: GitHub repository owner
+        repo_name: GitHub repository name
+        branch: Branch name containing the repo.json file
+    
+    Returns:
+        Dictionary mapping file paths to success status
+    """
+    results = {}
+    
+    try:
+        # Fetch the repo.json file
+        repo_json_content = fetch_github_file(repo_owner, repo_name, ".cf/repo.json", branch)
+        repo_data = json.loads(repo_json_content)
+        
+        # Save the repo.json file to local .cf directory
+        cf_dir = os.path.join(project_root, ".cf")
+        os.makedirs(cf_dir, exist_ok=True)
+        local_repo_json_path = os.path.join(cf_dir, "repo.json")
+        
+        with open(local_repo_json_path, 'w', encoding='utf-8') as f:
+            f.write(repo_json_content)
+        results[".cf/repo.json"] = True
+        
+        changes = repo_data.get("changes", [])
+        
+        for file_path in changes:
+            local_file_path = os.path.join(project_root, file_path)
+            success = download_github_file(repo_owner, repo_name, file_path, local_file_path, branch)
+            results[file_path] = success
+            
+    except Exception as e:
+        # If we can't fetch the repo.json, return empty results
+        results["error"] = str(e)
+    
+    return results 

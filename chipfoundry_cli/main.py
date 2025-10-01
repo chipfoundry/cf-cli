@@ -4,7 +4,7 @@ from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
     get_config_path, load_user_config, save_user_config, GDS_TYPE_MAP,
-    open_html_in_browser, download_with_progress
+    open_html_in_browser, download_with_progress, update_repo_files
 )
 import os
 from pathlib import Path
@@ -881,6 +881,74 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
         if transport:
             sftp.close()
             transport.close()
+
+@main.group('repo')
+def repo_group():
+    """Repository management commands."""
+    pass
+
+@repo_group.command('update')
+@click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
+@click.option('--repo-owner', default='chipfoundry', help='GitHub repository owner (default: chipfoundry)')
+@click.option('--repo-name', default='caravel_user_project', help='GitHub repository name (default: caravel_user_project)')
+@click.option('--branch', default='cli-update', help='Branch name containing the repo.json file (default: cli-update)')
+@click.option('--dry-run', is_flag=True, help='Preview changes without updating files')
+def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
+    """Update local repository files from upstream GitHub repository based on .cf/repo.json changes list."""
+    # If .cf/project.json exists in cwd, use it as default project_root
+    cwd_root, _ = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        project_root = os.getcwd()
+    
+    console.print(f"[bold cyan]Updating repository files from {repo_owner}/{repo_name}@{branch}[/bold cyan]")
+    
+    try:
+        if dry_run:
+            console.print("[yellow]Dry run mode - no files will be modified[/yellow]")
+            # Fetch repo.json to show what would be updated
+            from chipfoundry_cli.utils import fetch_github_file
+            repo_json_content = fetch_github_file(repo_owner, repo_name, ".cf/repo.json", branch)
+            repo_data = json.loads(repo_json_content)
+            changes = repo_data.get("changes", [])
+            
+            console.print(f"[cyan]Files that would be updated:[/cyan]")
+            console.print(f"  • .cf/repo.json (configuration file)")
+            for file_path in changes:
+                console.print(f"  • {file_path}")
+        else:
+            # Perform the actual update
+            results = update_repo_files(project_root, repo_owner, repo_name, branch)
+            
+            if "error" in results:
+                console.print(f"[red]Failed to fetch repository information: {results['error']}[/red]")
+                raise click.Abort()
+            
+            # Display results
+            success_count = 0
+            failure_count = 0
+            
+            console.print(f"[cyan]Update results:[/cyan]")
+            for file_path, success in results.items():
+                if success:
+                    console.print(f"[green]✓ Updated: {file_path}[/green]")
+                    success_count += 1
+                else:
+                    console.print(f"[red]✗ Failed: {file_path}[/red]")
+                    failure_count += 1
+            
+            if success_count > 0:
+                console.print(f"[green]Successfully updated {success_count} file(s)[/green]")
+            if failure_count > 0:
+                console.print(f"[red]Failed to update {failure_count} file(s)[/red]")
+                raise click.Abort()
+            else:
+                console.print("[green]All files updated successfully![/green]")
+                
+    except Exception as e:
+        console.print(f"[red]Repository update failed: {e}[/red]")
+        raise click.Abort()
 
 if __name__ == "__main__":
     main() 
