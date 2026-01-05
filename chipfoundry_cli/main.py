@@ -17,11 +17,113 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, Ta
 import json
 import subprocess
 import sys
+import shutil
 
 DEFAULT_SSH_KEY = os.path.expanduser('~/.ssh/chipfoundry-key')
 DEFAULT_SFTP_HOST = 'sftp.chipfoundry.io'
 
 console = Console()
+
+def get_git_tag(repo_path):
+    """Get the current git tag/branch of a repository."""
+    try:
+        # Try to get exact tag match
+        result = subprocess.run(
+            ['git', 'describe', '--tags', '--exact-match'],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        
+        # Try to get tag from HEAD (works in detached HEAD state)
+        result = subprocess.run(
+            ['git', 'describe', '--tags'],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            tag = result.stdout.strip()
+            # Remove any commit suffix like -1-g1234567
+            if '-' in tag:
+                tag = tag.split('-')[0]
+            return tag
+        
+        # If no tags, get branch name
+        result = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            # In detached HEAD, this returns "HEAD", so try one more thing
+            if branch == "HEAD":
+                # Get all tags pointing to current commit
+                result = subprocess.run(
+                    ['git', 'tag', '--points-at', 'HEAD'],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    # Return the first tag
+                    return result.stdout.strip().split('\n')[0]
+            return branch
+    except Exception:
+        pass
+    return None
+
+def check_version_installed(component_dir, expected_version):
+    """Check if a git component is installed with the correct version."""
+    if not Path(component_dir).exists():
+        return False, None
+    
+    # Check if the expected version tag exists on the current commit
+    try:
+        result = subprocess.run(
+            ['git', 'tag', '--points-at', 'HEAD'],
+            cwd=component_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            tags = result.stdout.strip().split('\n')
+            # Check if our expected version is in the list of tags
+            if expected_version in tags:
+                return True, expected_version
+            # If not, return the first tag as current version
+            return False, tags[0] if tags else None
+    except Exception:
+        pass
+    
+    # Fallback to get_git_tag if the above fails
+    current_version = get_git_tag(component_dir)
+    if current_version == expected_version:
+        return True, current_version
+    return False, current_version
+
+def check_python_package_installed(venv_dir, package_name):
+    """Check if a Python package is installed in a venv."""
+    if not Path(venv_dir).exists():
+        return False
+    
+    venv_python = Path(venv_dir) / 'bin' / 'python3'
+    if not venv_python.exists():
+        return False
+    
+    try:
+        result = subprocess.run(
+            [str(venv_python), '-m', 'pip', 'show', package_name],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 def get_project_json_from_cwd():
     cf_path = Path(os.getcwd()) / '.cf' / 'project.json'
@@ -881,6 +983,538 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
         if transport:
             sftp.close()
             transport.close()
+
+@main.command('setup')
+@click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
+@click.option('--repo-owner', default='chipfoundry', help='GitHub repository owner (default: chipfoundry)')
+@click.option('--repo-name', default='caravel_user_project', help='GitHub repository name (default: caravel_user_project)')
+@click.option('--branch', default='main', help='Branch name (default: main)')
+@click.option('--pdk', default='sky130A', type=click.Choice(['sky130A', 'sky130B']), help='PDK variant (default: sky130A)')
+@click.option('--caravel-lite/--no-caravel-lite', default=True, help='Install caravel-lite (default) or full caravel')
+@click.option('--only-caravel', is_flag=True, help='Only install Caravel')
+@click.option('--only-mcw', is_flag=True, help='Only install Management Core Wrapper')
+@click.option('--only-openlane', is_flag=True, help='Only install OpenLane/LibreLane')
+@click.option('--only-pdk', is_flag=True, help='Only install PDK')
+@click.option('--only-timing', is_flag=True, help='Only install timing scripts')
+@click.option('--only-cocotb', is_flag=True, help='Only setup Cocotb')
+@click.option('--only-precheck', is_flag=True, help='Only install precheck')
+@click.option('--overwrite', is_flag=True, help='Overwrite/reinstall even if correct version exists')
+@click.option('--dry-run', is_flag=True, help='Preview actions without making changes')
+def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite, 
+          only_caravel, only_mcw, only_openlane, only_pdk, only_timing, only_cocotb, only_precheck, overwrite, dry_run):
+    """Set up a ChipFoundry project by installing dependencies.
+    
+    By default, installs everything. Use --only-* flags to install specific components only.
+    This command replaces 'make setup' from the Makefile.
+    """
+    # If .cf/project.json exists in cwd, use it as default project_root
+    cwd_root, cwd_project_name = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        project_root = os.getcwd()
+    
+    project_root_path = Path(project_root)
+    
+    # Determine what to install based on --only-* flags
+    only_flags = [only_caravel, only_mcw, only_openlane, only_pdk, only_timing, only_cocotb, only_precheck]
+    only_mode = any(only_flags)
+    
+    # If in "only" mode, only install what's specified
+    # If not in "only" mode, install everything
+    install_caravel = only_caravel or not only_mode
+    install_mcw = only_mcw or not only_mode
+    install_openlane = only_openlane or not only_mode
+    install_pdk = only_pdk or not only_mode
+    install_timing = only_timing or not only_mode
+    install_cocotb = only_cocotb or not only_mode
+    install_precheck = only_precheck or not only_mode
+    
+    # Build configuration summary
+    config_lines = [
+        "[bold cyan]ChipFoundry Project Setup[/bold cyan]\n",
+        f"Project directory: [yellow]{project_root}[/yellow]",
+        f"Repository: [yellow]{repo_owner}/{repo_name}@{branch}[/yellow]",
+        f"PDK: [yellow]{pdk}[/yellow]",
+        f"Caravel variant: [yellow]{'caravel-lite' if caravel_lite else 'caravel'}[/yellow]",
+    ]
+    
+    if only_mode:
+        installing = []
+        if only_caravel: installing.append("caravel")
+        if only_mcw: installing.append("mcw")
+        if only_openlane: installing.append("openlane")
+        if only_pdk: installing.append("pdk")
+        if only_timing: installing.append("timing")
+        if only_cocotb: installing.append("cocotb")
+        if only_precheck: installing.append("precheck")
+        config_lines.append(f"\n[cyan]Installing only: {', '.join(installing)}[/cyan]")
+    else:
+        config_lines.append("\n[cyan]Installing: All components[/cyan]")
+    
+    console.print(Panel(
+        "\n".join(config_lines),
+        title="Setup Configuration",
+        expand=False
+    ))
+    
+    if dry_run:
+        console.print("[yellow]Dry run mode - no changes will be made[/yellow]\n")
+    
+    # Step 1: Create dependencies directory
+    if not only_mode or install_timing or install_caravel:
+        console.print("[bold]Step 1:[/bold] Creating dependencies directory...")
+        deps_dir = project_root_path / 'dependencies'
+        if dry_run:
+            console.print(f"[dim]Would create: {deps_dir}[/dim]")
+        else:
+            deps_dir.mkdir(exist_ok=True)
+            console.print(f"[green]✓[/green] Dependencies directory ready at {deps_dir}")
+    
+    # Step 2: Install Caravel/Caravel-Lite
+    if install_caravel:
+        console.print("\n[bold]Step 2:[/bold] Installing Caravel...")
+        caravel_dir = project_root_path / 'caravel'
+        caravel_name = 'caravel-lite' if caravel_lite else 'caravel'
+        
+        # Determine MPW tag based on PDK
+        mpw_tag = {
+            'sky130A': 'CC2509',
+            'sky130B': '2024.09.12-1',
+        }.get(pdk, 'CC2509')
+        
+        # Caravel repository URL
+        caravel_repo = f'https://github.com/chipfoundry/{caravel_name}'
+        
+        # Check if already installed with correct version
+        is_correct_version, current_version = check_version_installed(caravel_dir, mpw_tag)
+        
+        if is_correct_version and not overwrite:
+            console.print(f"[green]✓[/green] {caravel_name.capitalize()} already installed (version: {current_version})")
+        elif dry_run:
+            if is_correct_version:
+                console.print(f"[dim]Would reinstall: {caravel_repo} (tag: {mpw_tag}) [--overwrite][/dim]")
+            else:
+                console.print(f"[dim]Would install: {caravel_repo} (tag: {mpw_tag})[/dim]")
+        else:
+            try:
+                if caravel_dir.exists():
+                    if current_version:
+                        console.print(f"[cyan]Removing existing {caravel_name} (version: {current_version})...[/cyan]")
+                    else:
+                        console.print(f"[cyan]Removing existing {caravel_dir}...[/cyan]")
+                    shutil.rmtree(caravel_dir)
+                
+                console.print(f"[cyan]Cloning {caravel_name} (tag: {mpw_tag})...[/cyan]")
+                result = subprocess.run(
+                    ['git', 'clone', '-b', mpw_tag, '--depth=1', caravel_repo, str(caravel_dir)],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                console.print(f"[green]✓[/green] {caravel_name.capitalize()} installed successfully")
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗[/red] Failed to install caravel: {e}")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
+    
+    # Step 3: Install Management Core Wrapper
+    if install_mcw:
+        console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
+        mcw_dir = project_root_path / 'mgmt_core_wrapper'
+        
+        # Determine MPW tag and MCW repo based on PDK
+        mpw_tag = {
+            'sky130A': 'CC2509',
+            'sky130B': '2024.09.12-1',
+        }.get(pdk, 'CC2509')
+        
+        mcw_name = 'mcw-litex-vexriscv'
+        mcw_repo = 'https://github.com/chipfoundry/caravel_mgmt_soc_litex'
+        
+        # Check if already installed with correct version
+        is_correct_version, current_version = check_version_installed(mcw_dir, mpw_tag)
+        
+        if is_correct_version and not overwrite:
+            console.print(f"[green]✓[/green] MCW already installed (version: {current_version})")
+        elif dry_run:
+            if is_correct_version:
+                console.print(f"[dim]Would reinstall: {mcw_repo} (tag: {mpw_tag}) [--overwrite][/dim]")
+            else:
+                console.print(f"[dim]Would install: {mcw_repo} (tag: {mpw_tag})[/dim]")
+        else:
+            try:
+                if mcw_dir.exists():
+                    if current_version:
+                        console.print(f"[cyan]Removing existing MCW (version: {current_version})...[/cyan]")
+                    else:
+                        console.print(f"[cyan]Removing existing {mcw_dir}...[/cyan]")
+                    shutil.rmtree(mcw_dir)
+                
+                console.print(f"[cyan]Cloning {mcw_name} (tag: {mpw_tag})...[/cyan]")
+                result = subprocess.run(
+                    ['git', 'clone', '-b', mpw_tag, '--depth=1', mcw_repo, str(mcw_dir)],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                console.print(f"[green]✓[/green] Management Core Wrapper installed successfully")
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗[/red] Failed to install MCW: {e}")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
+    
+    # Step 4: Install OpenLane/LibreLane
+    if install_openlane:
+        console.print("\n[bold]Step 4:[/bold] Installing OpenLane/LibreLane...")
+        openlane_venv_dir = project_root_path / 'openlane' / '.venv'
+        openlane_version_file = project_root_path / 'openlane' / f'.version-CI2511'
+        
+        # Check if already installed
+        is_installed = check_python_package_installed(openlane_venv_dir, 'librelane') and openlane_version_file.exists()
+        
+        if is_installed and not overwrite:
+            console.print("[green]✓[/green] OpenLane/LibreLane already installed (version: CI2511)")
+        elif dry_run:
+            if is_installed:
+                console.print("[dim]Would reinstall OpenLane/LibreLane [--overwrite][/dim]")
+            else:
+                console.print("[dim]Would install OpenLane/LibreLane Python virtual environment[/dim]")
+        else:
+            try:
+                # Create openlane directory if it doesn't exist
+                openlane_dir = project_root_path / 'openlane'
+                openlane_dir.mkdir(exist_ok=True)
+                
+                # Remove existing venv if overwriting
+                if openlane_venv_dir.exists():
+                    console.print("[cyan]Removing existing OpenLane venv...[/cyan]")
+                    shutil.rmtree(openlane_venv_dir)
+                
+                console.print("[cyan]Creating OpenLane virtual environment...[/cyan]")
+                subprocess.run(
+                    [sys.executable, '-m', 'venv', str(openlane_venv_dir)],
+                    check=True,
+                    capture_output=True
+                )
+                
+                venv_python = str(openlane_venv_dir / 'bin' / 'python3')
+                
+                console.print("[cyan]Upgrading pip...[/cyan]")
+                subprocess.run(
+                    [venv_python, '-m', 'pip', 'install', '--upgrade', 'pip'],
+                    check=True,
+                    capture_output=True
+                )
+                
+                console.print("[cyan]Installing LibreLane...[/cyan]")
+                subprocess.run(
+                    [venv_python, '-m', 'pip', 'install', 
+                     'https://github.com/chipfoundry/openlane-2/tarball/CI2511'],
+                    check=True,
+                    capture_output=True
+                )
+                
+                # Save manifest
+                console.print("[cyan]Saving package manifest...[/cyan]")
+                result = subprocess.run(
+                    [venv_python, '-m', 'pip', 'freeze'],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                manifest_file = openlane_venv_dir / 'manifest.txt'
+                with open(manifest_file, 'w') as f:
+                    f.write(result.stdout)
+                
+                # Create version file
+                with open(openlane_version_file, 'w') as f:
+                    f.write('CI2511\n')
+                
+                console.print("[green]✓[/green] OpenLane/LibreLane installed successfully")
+                console.print("[dim]LibreLane will auto-pull Docker images when needed[/dim]")
+                
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗[/red] Failed to install OpenLane: {e}")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
+            except Exception as e:
+                console.print(f"[red]✗[/red] Unexpected error during OpenLane setup: {e}")
+    
+    # Step 5: Install PDK with Ciel
+    if install_pdk:
+        console.print("\n[bold]Step 5:[/bold] Installing PDK with Ciel...")
+        caravel_venv_dir = project_root_path / 'caravel' / 'venv'
+        pdk_root = project_root_path / 'dependencies' / 'pdks'
+        
+        # Determine OPEN_PDKS_COMMIT based on PDK
+        open_pdks_commit = {
+            'sky130A': '3e0e31dcce8519a7dbb82590346db16d91b7244f',
+            'sky130B': '3e0e31dcce8519a7dbb82590346db16d91b7244f',
+        }.get(pdk, '3e0e31dcce8519a7dbb82590346db16d91b7244f')
+        
+        pdk_version_file = pdk_root / f'.version-{open_pdks_commit[:7]}'
+        
+        # Check if already installed
+        is_installed = (
+            check_python_package_installed(caravel_venv_dir, 'ciel') and
+            pdk_version_file.exists() and
+            (pdk_root / pdk).exists()
+        )
+        
+        if is_installed and not overwrite:
+            console.print(f"[green]✓[/green] PDK {pdk} already installed (commit: {open_pdks_commit[:7]})")
+        elif dry_run:
+            if is_installed:
+                console.print(f"[dim]Would reinstall PDK {pdk} using Ciel [--overwrite][/dim]")
+            else:
+                console.print(f"[dim]Would install PDK {pdk} using Ciel[/dim]")
+        else:
+            try:
+                # Check if caravel directory exists
+                caravel_dir = project_root_path / 'caravel'
+                if not caravel_dir.exists():
+                    console.print("[yellow]Warning: Caravel not found. Install caravel first.[/yellow]")
+                    console.print("[cyan]Run: cf setup --only-caravel[/cyan]")
+                else:
+                    # Remove existing venv if overwriting or doesn't exist
+                    if caravel_venv_dir.exists() and (overwrite or not is_installed):
+                        console.print("[cyan]Removing existing Ciel venv...[/cyan]")
+                        shutil.rmtree(caravel_venv_dir)
+                    
+                    if not caravel_venv_dir.exists():
+                        console.print("[cyan]Creating Ciel virtual environment...[/cyan]")
+                        subprocess.run(
+                            [sys.executable, '-m', 'venv', str(caravel_venv_dir)],
+                            check=True,
+                            capture_output=True
+                        )
+                        
+                        venv_python = str(caravel_venv_dir / 'bin' / 'python3')
+                        
+                        console.print("[cyan]Installing Ciel...[/cyan]")
+                        subprocess.run(
+                            [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'pip'],
+                            check=True,
+                            capture_output=True
+                        )
+                        subprocess.run(
+                            [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'ciel'],
+                            check=True,
+                            capture_output=True
+                        )
+                        console.print("[green]✓[/green] Ciel installed successfully")
+                    
+                    # Remove existing PDK if overwriting
+                    if (pdk_root / pdk).exists() and overwrite:
+                        console.print(f"[cyan]Removing existing PDK {pdk}...[/cyan]")
+                        shutil.rmtree(pdk_root / pdk)
+                    
+                    if not (pdk_root / pdk).exists():
+                        console.print(f"[cyan]Enabling PDK {pdk} with Ciel...[/cyan]")
+                        console.print("[dim]Downloading and installing PDK files...[/dim]")
+                        
+                        # Determine PDK family from PDK variant (sky130A/sky130B -> sky130)
+                        pdk_family = pdk.rstrip('AB')  # Remove A or B suffix
+                        
+                        ciel_bin = str(caravel_venv_dir / 'bin' / 'ciel')
+                        
+                        # Set up environment with PDK_ROOT
+                        env = os.environ.copy()
+                        env['PDK_ROOT'] = str(pdk_root)
+                        env['CIEL_DATA_SOURCE'] = 'static-web:https://chipfoundry.github.io/ciel-releases'
+                        
+                        result = subprocess.run(
+                            [ciel_bin, 'enable', '--pdk-family', pdk_family, open_pdks_commit],
+                            cwd=str(caravel_dir),
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            check=True
+                        )
+                        
+                        # Verify PDK was actually installed
+                        if not (pdk_root / pdk).exists():
+                            raise Exception(f"PDK directory {pdk_root / pdk} was not created by Ciel")
+                        
+                        # Create version file only if PDK exists
+                        pdk_root.mkdir(parents=True, exist_ok=True)
+                        with open(pdk_version_file, 'w') as f:
+                            f.write(f'{open_pdks_commit}\n')
+                        
+                        console.print("[green]✓[/green] PDK installed successfully")
+                        console.print(f"[dim]PDK installed to: {pdk_root}[/dim]")
+                
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗[/red] Failed to install PDK: {e}")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
+            except Exception as e:
+                console.print(f"[red]✗[/red] Unexpected error during PDK setup: {e}")
+    
+    # Step 6: Install timing scripts
+    if install_timing:
+        step_num = 6 if not only_mode else ""
+        console.print(f"\n[bold]Step {step_num}:[/bold] Installing timing scripts...")
+        timing_dir = project_root_path / 'dependencies' / 'timing-scripts'
+        timing_repo = 'https://github.com/chipfoundry/timing-scripts.git'
+        
+        # Check if already installed (timing-scripts uses main branch, no version tags)
+        is_installed = timing_dir.exists() and (timing_dir / '.git').exists()
+        
+        if is_installed and not overwrite:
+            console.print("[green]✓[/green] Timing scripts already installed")
+        elif dry_run:
+            if is_installed:
+                console.print(f"[dim]Would update: {timing_repo} [--overwrite][/dim]")
+            else:
+                console.print(f"[dim]Would clone: {timing_repo}[/dim]")
+        else:
+            try:
+                if timing_dir.exists():
+                    if overwrite:
+                        console.print("[cyan]Updating existing timing-scripts...[/cyan]")
+                        result = subprocess.run(
+                            ['git', 'pull'],
+                            cwd=str(timing_dir),
+                            capture_output=True,
+                            text=True,
+                            check=True
+                        )
+                        console.print("[green]✓[/green] Timing scripts updated")
+                else:
+                    # Ensure dependencies directory exists
+                    timing_dir.parent.mkdir(parents=True, exist_ok=True)
+                    console.print("[cyan]Cloning timing-scripts...[/cyan]")
+                    result = subprocess.run(
+                        ['git', 'clone', timing_repo, str(timing_dir)],
+                        capture_output=True,
+                        text=True,
+                        check=True
+                    )
+                    console.print("[green]✓[/green] Timing scripts installed")
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗[/red] Failed to install timing scripts: {e}")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
+    
+    # Step 7: Set up Cocotb
+    if install_cocotb:
+        step_num = 7 if not only_mode else ""
+        console.print(f"\n[bold]Step {step_num}:[/bold] Setting up Cocotb...")
+        venv_cocotb = project_root_path / 'venv-cocotb'
+        
+        # Check if already installed
+        is_installed = check_python_package_installed(venv_cocotb, 'caravel-cocotb')
+        
+        if is_installed and not overwrite:
+            console.print("[green]✓[/green] Cocotb already installed")
+        elif dry_run:
+            if is_installed:
+                console.print("[dim]Would reinstall Cocotb virtual environment [--overwrite][/dim]")
+            else:
+                console.print("[dim]Would create Cocotb virtual environment and install dependencies[/dim]")
+        else:
+            try:
+                # Remove existing venv-cocotb if overwriting
+                if venv_cocotb.exists() and overwrite:
+                    console.print("[cyan]Removing existing venv-cocotb...[/cyan]")
+                    shutil.rmtree(venv_cocotb)
+                
+                if not venv_cocotb.exists():
+                    console.print("[cyan]Creating Cocotb virtual environment...[/cyan]")
+                    subprocess.run(
+                        [sys.executable, '-m', 'venv', str(venv_cocotb)],
+                        check=True,
+                        capture_output=True
+                    )
+                    
+                    # Determine the python executable path in venv
+                    venv_python = str(venv_cocotb / 'bin' / 'python3')
+                    
+                    console.print("[cyan]Installing caravel-cocotb...[/cyan]")
+                    subprocess.run(
+                        [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'pip'],
+                        check=True,
+                        capture_output=True
+                    )
+                    subprocess.run(
+                        [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'caravel-cocotb'],
+                        check=True,
+                        capture_output=True
+                    )
+                    console.print("[green]✓[/green] Cocotb environment set up successfully")
+                
+                # Pull cocotb docker image
+                console.print("[cyan]Pulling Cocotb Docker image...[/cyan]")
+                subprocess.run(
+                    ['docker', 'pull', 'chipfoundry/dv:cocotb'],
+                    check=True,
+                    capture_output=True
+                )
+                console.print("[green]✓[/green] Cocotb Docker image ready")
+                
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗[/red] Failed to set up Cocotb: {e}")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
+            except Exception as e:
+                console.print(f"[red]✗[/red] Unexpected error during Cocotb setup: {e}")
+    
+    # Step 8: Install precheck
+    if install_precheck:
+        step_num = 8 if not only_mode else ""
+        console.print(f"\n[bold]Step {step_num}:[/bold] Installing precheck...")
+        precheck_dir = Path.home() / 'mpw_precheck'
+        
+        # Check if already installed
+        is_installed = precheck_dir.exists() and (precheck_dir / '.git').exists()
+        
+        if is_installed and not overwrite:
+            console.print("[green]✓[/green] Precheck already installed")
+        elif dry_run:
+            if is_installed:
+                console.print("[dim]Would reinstall mpw_precheck [--overwrite][/dim]")
+            else:
+                console.print("[dim]Would install mpw_precheck[/dim]")
+        else:
+            try:
+                if precheck_dir.exists() and overwrite:
+                    console.print(f"[cyan]Removing existing {precheck_dir}...[/cyan]")
+                    shutil.rmtree(precheck_dir)
+                
+                if not precheck_dir.exists():
+                    console.print("[cyan]Cloning mpw_precheck...[/cyan]")
+                    subprocess.run(
+                        ['git', 'clone', '--depth=1', 'https://github.com/chipfoundry/mpw_precheck.git', str(precheck_dir)],
+                        check=True,
+                        capture_output=True,
+                        text=True
+                    )
+                    console.print("[green]✓[/green] Precheck cloned successfully")
+                
+                console.print("[cyan]Pulling precheck Docker image...[/cyan]")
+                subprocess.run(
+                    ['docker', 'pull', 'chipfoundry/mpw_precheck:latest'],
+                    check=True,
+                    capture_output=True
+                )
+                console.print("[green]✓[/green] Precheck Docker image ready")
+                
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]✗[/red] Failed to install precheck: {e}")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
+    
+    # Summary
+    console.print("\n" + "="*60)
+    if dry_run:
+        console.print("[bold yellow]Dry run complete![/bold yellow] No changes were made.")
+    else:
+        if only_mode:
+            console.print("[bold green]Installation complete![/bold green]")
+        else:
+            console.print("[bold green]Setup complete![/bold green]")
 
 @main.group('repo')
 def repo_group():
