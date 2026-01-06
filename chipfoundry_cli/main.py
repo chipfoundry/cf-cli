@@ -1516,6 +1516,273 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         else:
             console.print("[bold green]Setup complete![/bold green]")
 
+@main.command('harden')
+@click.argument('macro', required=False)
+@click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
+@click.option('--list', 'list_designs', is_flag=True, help='List all available macros')
+@click.option('--tag', help='Custom run tag (defaults to timestamp)')
+@click.option('--pdk', help='PDK to use (defaults to sky130A)')
+@click.option('--use-nix', is_flag=True, help='Force use of Nix (fails if Nix not available)')
+@click.option('--use-docker', is_flag=True, help='Force use of Docker (fails if Docker not available)')
+@click.option('--dry-run', is_flag=True, help='Show the configuration without running')
+def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry_run):
+    """Harden a macro using LibreLane (OpenLane 2).
+    
+    Examples:
+        cf harden user_proj_example
+        cf harden user_project_wrapper
+        cf harden --list
+    """
+    from datetime import datetime
+    
+    # If .cf/project.json exists in cwd, use it as default project_root
+    cwd_root, _ = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        project_root = os.getcwd()
+    
+    project_root_path = Path(project_root)
+    openlane_dir = project_root_path / 'openlane'
+    
+    # Check if openlane directory exists
+    if not openlane_dir.exists():
+        console.print(f"[red]✗[/red] OpenLane directory not found: {openlane_dir}")
+        console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
+        return
+    
+    # List designs if requested
+    if list_designs:
+        console.print("[bold cyan]Available macros:[/bold cyan]")
+        designs = [d.name for d in openlane_dir.iterdir() if d.is_dir() and ((d / 'config.json').exists() or (d / 'config.yaml').exists() or (d / 'config.tcl').exists())]
+        if designs:
+            for design in sorted(designs):
+                config_file = None
+                for ext in ['json', 'yaml', 'tcl']:
+                    config_path = openlane_dir / design / f'config.{ext}'
+                    if config_path.exists():
+                        config_file = f'config.{ext}'
+                        break
+                console.print(f"  • {design} ({config_file})")
+        else:
+            console.print("[yellow]No macros found in openlane/[/yellow]")
+        return
+    
+    # Macro is required if not listing
+    if not macro:
+        console.print("[red]✗[/red] Error: MACRO argument is required")
+        console.print("[yellow]Usage:[/yellow] cf harden <macro>")
+        console.print("[yellow]       [/yellow] cf harden --list")
+        return
+    
+    # Check if macro exists
+    macro_dir = openlane_dir / macro
+    if not macro_dir.exists():
+        console.print(f"[red]✗[/red] Macro not found: {macro}")
+        console.print(f"[yellow]Run 'cf harden --list' to see available macros[/yellow]")
+        return
+    
+    # Find config file
+    config_file = None
+    for ext in ['json', 'yaml', 'tcl']:
+        config_path = macro_dir / f'config.{ext}'
+        if config_path.exists():
+            config_file = str(config_path)
+            break
+    
+    if not config_file:
+        console.print(f"[red]✗[/red] No config file found for {macro}")
+        console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
+        return
+    
+    # Check for LibreLane venv
+    librelane_venv = openlane_dir / '.venv'
+    if not librelane_venv.exists():
+        console.print("[red]✗[/red] LibreLane not installed")
+        console.print("[yellow]Run 'cf setup --only-openlane' to install LibreLane[/yellow]")
+        return
+    
+    # Detect available execution method: Nix > Docker > Error
+    force_nix_flag = use_nix
+    force_docker_flag = use_docker
+    use_nix = False
+    use_docker = False
+    
+    # Check for conflicting flags
+    if force_nix_flag and force_docker_flag:
+        console.print("[red]✗[/red] Cannot use both --use-nix and --use-docker")
+        return
+    
+    # Check if Nix is available
+    if force_nix_flag or not force_docker_flag:
+        nix_available = shutil.which('nix') is not None
+        if nix_available:
+            # Check if LibreLane is accessible via Nix
+            try:
+                result = subprocess.run(
+                    ['nix', 'flake', 'metadata', 'github:chipfoundry/openlane-2/CI2511', '--json'],
+                    capture_output=True,
+                    timeout=5
+                )
+                use_nix = result.returncode == 0
+            except:
+                pass
+        
+        if force_nix_flag and not use_nix:
+            console.print("[red]✗[/red] Nix not available or cannot access LibreLane flake")
+            console.print("[yellow]Install Nix from: https://librelane.readthedocs.io[/yellow]")
+            return
+    
+    # Check if Docker is available
+    if not use_nix and (force_docker_flag or not force_nix_flag):
+        try:
+            result = subprocess.run(
+                ['docker', 'info'],
+                capture_output=True,
+                timeout=5
+            )
+            use_docker = result.returncode == 0
+        except:
+            pass
+        
+        if force_docker_flag and not use_docker:
+            console.print("[red]✗[/red] Docker not available")
+            console.print("[yellow]Install Docker from: https://docker.com[/yellow]")
+            return
+    
+    # Error if neither is available
+    if not use_nix and not use_docker:
+        console.print("[red]✗[/red] Neither Nix nor Docker is available")
+        console.print("\n[yellow]LibreLane requires either:[/yellow]")
+        console.print("  1. [cyan]Nix[/cyan] - Install from: https://librelane.readthedocs.io")
+        console.print("  2. [cyan]Docker[/cyan] - Install from: https://docker.com")
+        console.print("\nAfter installing either one, try again.")
+        return
+    
+    execution_method = "Nix" if use_nix else "Docker"
+    
+    # Set up environment variables
+    caravel_root = project_root_path / 'caravel'
+    pdk_root = project_root_path / 'dependencies' / 'pdks'
+    
+    if not pdk:
+        # Try to detect PDK from project.json
+        project_json_path = project_root_path / '.cf' / 'project.json'
+        if project_json_path.exists():
+            try:
+                with open(project_json_path, 'r') as f:
+                    project_data = json.load(f)
+                    pdk = project_data.get('pdk', 'sky130A')
+            except:
+                pdk = 'sky130A'
+        else:
+            pdk = 'sky130A'
+    
+    # Verify PDK is installed
+    pdk_dir = pdk_root / pdk
+    if not pdk_dir.exists():
+        console.print(f"[red]✗[/red] PDK not found: {pdk_dir}")
+        console.print("[yellow]Run 'cf setup --only-pdk' to install the PDK[/yellow]")
+        return
+    
+    if not tag:
+        tag = datetime.now().strftime('%y_%m_%d_%H_%M')
+    
+    # Display configuration
+    console.print("\n" + "="*60)
+    console.print(f"[bold cyan]Hardening: {macro}[/bold cyan]")
+    console.print(f"Config: [yellow]{Path(config_file).name}[/yellow]")
+    console.print(f"Run tag: [yellow]{tag}[/yellow]")
+    console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    console.print(f"PDK Root: [yellow]{pdk_root}[/yellow]")
+    console.print(f"Execution: [yellow]{execution_method}[/yellow]")
+    console.print("="*60 + "\n")
+    
+    if dry_run:
+        console.print("[bold yellow]Dry run - configuration ready[/bold yellow]")
+        console.print(f"Would use: {execution_method}")
+        return
+    
+    # Build command based on execution method
+    if use_nix:
+        # Use Nix to run LibreLane
+        console.print(f"[cyan]Running LibreLane via Nix on {macro}...[/cyan]")
+        console.print("[dim]This may take a while (15-60 minutes depending on design complexity)[/dim]\n")
+        
+        cmd = [
+            'nix', 'run', 'github:chipfoundry/openlane-2/CI2511', '--',
+            '--run-tag', tag,
+            '--manual-pdk',
+            '--pdk-root', str(pdk_root),
+            '--pdk', pdk,
+            '--ef-save-views-to', str(project_root_path),
+            '--overwrite',
+            config_file
+        ]
+        
+        env = os.environ.copy()
+        env.update({
+            'PROJECT_ROOT': str(project_root_path),
+            'CARAVEL_ROOT': str(caravel_root),
+            'PDK_ROOT': str(pdk_root),
+            'PDK': pdk,
+            'LIBRELANE_RUN_TAG': tag,
+        })
+        
+    else:
+        # Use Docker via venv
+        console.print(f"[cyan]Running LibreLane via Docker on {macro}...[/cyan]")
+        console.print("[dim]This may take a while (15-60 minutes depending on design complexity)[/dim]\n")
+        
+        # Set up environment for LibreLane
+        env = os.environ.copy()
+        env.update({
+            'PROJECT_ROOT': str(project_root_path),
+            'CARAVEL_ROOT': str(caravel_root),
+            'PDK_ROOT': str(pdk_root),
+            'PDK': pdk,
+            'LIBRELANE_RUN_TAG': tag,
+            'PYTHONPATH': str(librelane_venv / 'lib' / f'python{sys.version_info.major}.{sys.version_info.minor}' / 'site-packages')
+        })
+        
+        # Add venv to PATH so librelane can find its dependencies
+        venv_bin = librelane_venv / 'bin'
+        env['PATH'] = f"{venv_bin}:{env.get('PATH', '')}"
+        
+        # Build LibreLane command
+        # Note: When using --dockerized, LibreLane reads PDK settings from environment variables
+        cmd = [
+            str(venv_bin / 'python3'), '-m', 'librelane',
+            '-m', str(project_root_path),
+            '-m', str(pdk_root),
+            '-m', str(caravel_root),
+            '--dockerized',
+            '--run-tag', tag,
+            '--manual-pdk',
+            '--pdk-root', str(pdk_root),
+            '--pdk', pdk,
+            '--ef-save-views-to', str(project_root_path),
+            '--overwrite',
+            config_file
+        ]
+    
+    # Run LibreLane
+    
+    try:
+        result = subprocess.run(cmd, cwd=str(openlane_dir), env=env)
+        
+        if result.returncode == 0:
+            console.print(f"\n[green]✓[/green] [bold green]Successfully hardened {macro}![/bold green]")
+            console.print(f"[dim]Results saved to: {project_root_path}/runs/{macro}/{tag}/[/dim]")
+        else:
+            console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {result.returncode}[/bold red]")
+            console.print(f"[yellow]Check logs in: {project_root_path}/runs/{macro}/{tag}/[/yellow]")
+            
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
+    except Exception as e:
+        console.print(f"\n[red]✗[/red] Error: {e}")
+
 @main.group('repo')
 def repo_group():
     """Repository management commands."""
