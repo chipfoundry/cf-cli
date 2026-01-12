@@ -1445,6 +1445,24 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     )
                     console.print("[green]✓[/green] Cocotb environment set up successfully")
                 
+                # Run setup-cocotb.py to configure paths
+                console.print("[cyan]Configuring Cocotb paths...[/cyan]")
+                setup_cocotb_script = project_root_path / 'verilog' / 'dv' / 'setup-cocotb.py'
+                if setup_cocotb_script.exists():
+                    caravel_root = project_root_path / 'caravel'
+                    mcw_root = project_root_path / 'mgmt_core_wrapper'
+                    pdk_root = project_root_path / 'dependencies' / 'pdks'
+                    
+                    subprocess.run(
+                        [sys.executable, str(setup_cocotb_script),
+                         str(caravel_root), str(mcw_root), str(pdk_root), pdk, str(project_root_path)],
+                        check=True,
+                        capture_output=True
+                    )
+                    console.print("[green]✓[/green] Cocotb paths configured")
+                else:
+                    console.print("[yellow]⚠[/yellow] setup-cocotb.py not found, skipping path configuration")
+                
                 # Pull cocotb docker image
                 console.print("[cyan]Pulling Cocotb Docker image...[/cyan]")
                 subprocess.run(
@@ -1850,6 +1868,184 @@ def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
     except Exception as e:
         console.print(f"[red]Repository update failed: {e}[/red]")
         raise click.Abort()
+
+
+@main.command('verify')
+@click.argument('test', required=False)
+@click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
+@click.option('--sim', type=click.Choice(['rtl', 'gl'], case_sensitive=False), default='rtl', help='Simulation type: rtl or gl (gate-level)')
+@click.option('--list', 'list_tests', is_flag=True, help='List all available cocotb tests')
+@click.option('--all', 'run_all', is_flag=True, help='Run all tests')
+@click.option('--tag', help='Test list tag/yaml file (e.g., user_proj_tests)')
+@click.option('--dry-run', is_flag=True, help='Show the configuration without running')
+def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
+    """Run cocotb verification tests.
+    
+    Examples:
+        cf verify --list                    # List all available tests
+        cf verify counter_la                # Run a specific test (RTL)
+        cf verify counter_la --sim gl       # Run gate-level simulation
+        cf verify --all                     # Run all tests
+        cf verify --tag user_proj_tests     # Run tests from a yaml list
+    """
+    # If .cf/project.json exists in cwd, use it as default project_root
+    cwd_root, _ = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        project_root = os.getcwd()
+    
+    project_root_path = Path(project_root)
+    cocotb_dir = project_root_path / 'verilog' / 'dv' / 'cocotb'
+    venv_cocotb = project_root_path / 'venv-cocotb'
+    
+    # Check if cocotb directory exists
+    if not cocotb_dir.exists():
+        console.print(f"[red]✗[/red] Cocotb directory not found: {cocotb_dir}")
+        console.print("[yellow]This project may not have cocotb tests set up.[/yellow]")
+        return
+    
+    # Check if caravel-cocotb is installed
+    if not (venv_cocotb / 'bin' / 'caravel_cocotb').exists():
+        console.print(f"[red]✗[/red] caravel_cocotb not found in {venv_cocotb}")
+        console.print("[yellow]Run 'cf setup --only-cocotb' to install cocotb[/yellow]")
+        return
+    
+    # Find available tests
+    available_tests = []
+    available_yaml_files = []
+    
+    for item in cocotb_dir.rglob('*.yaml'):
+        yaml_name = item.stem
+        # Skip design_info.yaml and test list yamls at root of test dirs
+        if yaml_name not in ['design_info', 'user_proj_tests', 'user_proj_tests_gl']:
+            # Individual test yamls
+            available_tests.append(yaml_name)
+        else:
+            # Test list yamls
+            available_yaml_files.append(item.relative_to(cocotb_dir))
+    
+    if list_tests:
+        console.print("[bold green]Available cocotb tests:[/bold green]")
+        console.print("\n[cyan]Individual tests:[/cyan]")
+        for t in sorted(set(available_tests)):
+            console.print(f"  • {t}")
+        
+        console.print("\n[cyan]Test lists (use with --tag):[/cyan]")
+        for f in sorted(available_yaml_files):
+            console.print(f"  • {f.parent.name}/{f.name}" if f.parent.name != '.' else f" • {f.name}")
+        return
+    
+    # Determine what to run
+    if not test and not run_all and not tag:
+        console.print("[red]Error: Specify a test name, use --all, or --tag <test_list>[/red]")
+        console.print("Use 'cf verify --list' to see available tests")
+        return
+    
+    # Set up environment variables
+    caravel_root = project_root_path / 'caravel'
+    mcw_root = project_root_path / 'mgmt_core_wrapper'
+    pdk_root = project_root_path / 'dependencies' / 'pdks'
+    
+    # Detect PDK from project.json
+    pdk = 'sky130A'
+    project_json_path = project_root_path / '.cf' / 'project.json'
+    if project_json_path.exists():
+        try:
+            with open(project_json_path, 'r') as f:
+                project_data = json.load(f)
+                pdk = project_data.get('pdk', 'sky130A')
+        except:
+            pass
+    
+    # Check required paths exist
+    if not caravel_root.exists():
+        console.print(f"[red]✗[/red] Caravel not found at {caravel_root}")
+        console.print("[yellow]Run 'cf setup --only-caravel' to install[/yellow]")
+        return
+    
+    if not (pdk_root / pdk).exists():
+        console.print(f"[red]✗[/red] PDK not found at {pdk_root / pdk}")
+        console.print("[yellow]Run 'cf setup --only-pdk' to install[/yellow]")
+        return
+    
+    # Build command
+    caravel_cocotb_bin = venv_cocotb / 'bin' / 'caravel_cocotb'
+    sim_arg = 'GL' if sim.lower() == 'gl' else 'RTL'
+    
+    # Display configuration
+    console.print("\n" + "="*60)
+    console.print(f"[bold cyan]Cocotb Verification[/bold cyan]")
+    if test:
+        console.print(f"Test: [yellow]{test}[/yellow]")
+    elif run_all:
+        console.print(f"Running: [yellow]All tests[/yellow]")
+    elif tag:
+        console.print(f"Test list: [yellow]{tag}[/yellow]")
+    console.print(f"Simulation: [yellow]{sim_arg}[/yellow]")
+    console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    console.print("="*60 + "\n")
+    
+    if dry_run:
+        console.print("[bold yellow]Dry run - configuration ready[/bold yellow]\n")
+        if test:
+            console.print(f"Would run: {caravel_cocotb_bin} -t {test} -sim {sim_arg}")
+        elif run_all:
+            yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+            console.print(f"Would run: {caravel_cocotb_bin} -tl user_proj_tests/{yaml_file} -sim {sim_arg}")
+        elif tag:
+            console.print(f"Would run: {caravel_cocotb_bin} -tl {tag} -sim {sim_arg}")
+        return
+    
+    # Prepare environment
+    env = os.environ.copy()
+    env['CARAVEL_ROOT'] = str(caravel_root)
+    env['MCW_ROOT'] = str(mcw_root)
+    env['PDK_ROOT'] = str(pdk_root)
+    env['PDK'] = pdk
+    env['PROJECT_ROOT'] = str(project_root_path)
+    
+    # Build command args
+    cmd = [str(caravel_cocotb_bin)]
+    
+    if test:
+        cmd.extend(['-t', test])
+    elif run_all:
+        # Use the appropriate test list yaml
+        yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+        yaml_path = f'user_proj_tests/{yaml_file}'
+        cmd.extend(['-tl', yaml_path])
+    elif tag:
+        # User specified a custom test list
+        cmd.extend(['-tl', tag])
+    
+    if sim.lower() == 'gl':
+        cmd.extend(['-sim', 'GL'])
+    
+    # Run cocotb tests
+    console.print(f"[cyan]Running cocotb verification...[/cyan]")
+    console.print("[dim]This may take a while depending on the test complexity[/dim]\n")
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(cocotb_dir),
+            env=env,
+            text=True,
+            check=False  # Don't raise on non-zero exit
+        )
+        
+        if result.returncode == 0:
+            console.print(f"\n[green]✓[/green] Verification passed!")
+        else:
+            console.print(f"\n[red]✗[/red] Verification failed with exit code {result.returncode}")
+            console.print(f"[yellow]Check logs in: {cocotb_dir}[/yellow]")
+            
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
+    except Exception as e:
+        console.print(f"\n[red]✗[/red] Error: {e}")
+
 
 if __name__ == "__main__":
     main() 
