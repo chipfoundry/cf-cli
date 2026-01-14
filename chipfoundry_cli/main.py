@@ -1725,7 +1725,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     if use_nix:
         # Use Nix to run LibreLane
         console.print(f"[cyan]Running LibreLane via Nix on {macro}...[/cyan]")
-        console.print("[dim]This may take a while (15-60 minutes depending on design complexity)[/dim]\n")
+        console.print("[dim]This may take a while (15-60 minutes depending on design complexity). Press Ctrl+C to cancel.[/dim]\n")
         
         cmd = [
             'nix', 'run', 'github:chipfoundry/openlane-2/CI2511', '--',
@@ -1750,7 +1750,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     else:
         # Use Docker via venv
         console.print(f"[cyan]Running LibreLane via Docker on {macro}...[/cyan]")
-        console.print("[dim]This may take a while (15-60 minutes depending on design complexity)[/dim]\n")
+        console.print("[dim]This may take a while (15-60 minutes depending on design complexity). Press Ctrl+C to cancel.[/dim]\n")
         
         # Set up environment for LibreLane
         env = os.environ.copy()
@@ -1787,17 +1787,29 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     # Run LibreLane
     
     try:
-        result = subprocess.run(cmd, cwd=str(openlane_dir), env=env)
+        # Use Popen for better signal handling
+        process = subprocess.Popen(cmd, cwd=str(openlane_dir), env=env)
         
-        if result.returncode == 0:
+        # Wait for process to complete
+        returncode = process.wait()
+        
+        if returncode == 0:
             console.print(f"\n[green]✓[/green] [bold green]Successfully hardened {macro}![/bold green]")
             console.print(f"[dim]Results saved to: {project_root_path}/runs/{macro}/{tag}/[/dim]")
+        elif returncode == -2 or returncode == 130:  # SIGINT
+            console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
         else:
-            console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {result.returncode}[/bold red]")
+            console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {returncode}[/bold red]")
             console.print(f"[yellow]Check logs in: {project_root_path}/runs/{macro}/{tag}/[/yellow]")
             
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
+        # Try to stop the process gracefully
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except:
+            process.kill()
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error: {e}")
 
@@ -2043,6 +2055,356 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
             
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
+    except Exception as e:
+        console.print(f"\n[red]✗[/red] Error: {e}")
+
+
+
+@main.command('precheck')
+@click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
+@click.option('--disable-lvs', is_flag=True, help='Disable LVS check and run specific checks only')
+@click.option('--checks', multiple=True, help='Specific checks to run (can be specified multiple times)')
+@click.option('--dry-run', is_flag=True, help='Show the command without running')
+def precheck(project_root, disable_lvs, checks, dry_run):
+    """Run mpw_precheck validation on the project.
+    
+    This runs the MPW (Multi-Project Wafer) precheck tool to validate
+    your design before submission.
+    
+    Examples:
+        cf precheck                     # Run all checks
+        cf precheck --disable-lvs       # Skip LVS, run specific checks
+        cf precheck --checks license --checks makefile  # Run specific checks
+    """
+    # If .cf/project.json exists in cwd, use it as default project_root
+    cwd_root, _ = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        project_root = os.getcwd()
+    
+    project_root_path = Path(project_root)
+    precheck_root = Path.home() / 'mpw_precheck'
+    pdk_root = project_root_path / 'dependencies' / 'pdks'
+    
+    # Detect PDK from project.json
+    pdk = 'sky130A'
+    project_json_path = project_root_path / '.cf' / 'project.json'
+    if project_json_path.exists():
+        try:
+            with open(project_json_path, 'r') as f:
+                project_data = json.load(f)
+                pdk = project_data.get('pdk', 'sky130A')
+        except:
+            pass
+    
+    # Check if precheck is installed
+    if not precheck_root.exists():
+        console.print(f"[red]✗[/red] mpw_precheck not found at {precheck_root}")
+        console.print("[yellow]Run 'cf setup --only-precheck' to install[/yellow]")
+        return
+    
+    # Check if PDK exists
+    if not (pdk_root / pdk).exists():
+        console.print(f"[red]✗[/red] PDK not found at {pdk_root / pdk}")
+        console.print("[yellow]Run 'cf setup --only-pdk' to install[/yellow]")
+        return
+    
+    # Check Docker availability
+    docker_available = shutil.which('docker') is not None
+    if not docker_available:
+        console.print("[red]✗[/red] Docker not found. Docker is required to run precheck.")
+        return
+    
+    # Build the checks list
+    if checks:
+        # User specified custom checks
+        checks_list = list(checks)
+    elif disable_lvs:
+        # Default checks when LVS is disabled
+        checks_list = [
+            'license', 'makefile', 'default', 'documentation', 'consistency',
+            'gpio_defines', 'xor', 'magic_drc', 'klayout_feol', 'klayout_beol',
+            'klayout_offgrid', 'klayout_met_min_ca_density',
+            'klayout_pin_label_purposes_overlapping_drawing', 'klayout_zeroarea'
+        ]
+    else:
+        # All checks (default behavior)
+        checks_list = []
+    
+    # Display configuration
+    console.print("\n" + "="*60)
+    console.print("[bold cyan]MPW Precheck[/bold cyan]")
+    console.print(f"Project: [yellow]{project_root_path}[/yellow]")
+    console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    if disable_lvs:
+        console.print("Mode: [yellow]LVS disabled[/yellow]")
+    if checks_list:
+        console.print(f"Checks: [yellow]{', '.join(checks_list)}[/yellow]")
+    else:
+        console.print("Checks: [yellow]All checks[/yellow]")
+    console.print("="*60 + "\n")
+    
+    # Build Docker command
+    import getpass
+    import pwd
+    
+    user_id = os.getuid()
+    group_id = os.getgid()
+    
+    pdk_path = pdk_root / pdk
+    pdkpath = pdk_path  # Same as PDK_PATH in the Makefile
+    ipm_dir = Path.home() / '.ipm'
+    
+    # Create .ipm directory if it doesn't exist
+    if not ipm_dir.exists():
+        ipm_dir.mkdir(parents=True, exist_ok=True)
+    
+    docker_cmd = [
+        'docker', 'run', '--rm',
+        '-v', f'{precheck_root}:{precheck_root}',
+        '-v', f'{project_root_path}:{project_root_path}',
+        '-v', f'{pdk_root}:{pdk_root}',
+        '-v', f'{ipm_dir}:{ipm_dir}',
+        '-e', f'INPUT_DIRECTORY={project_root_path}',
+        '-e', f'PDK_PATH={pdk_path}',
+        '-e', f'PDK_ROOT={pdk_root}',
+        '-e', f'PDKPATH={pdkpath}',
+        '-u', f'{user_id}:{group_id}',
+        'chipfoundry/mpw_precheck:latest',
+        'bash', '-c',
+    ]
+    
+    # Build the precheck command
+    precheck_cmd = f'cd {precheck_root} ; python3 mpw_precheck.py --input_directory {project_root_path} --pdk_path {pdk_path}'
+    
+    if checks_list:
+        precheck_cmd += ' ' + ' '.join(checks_list)
+    
+    docker_cmd.append(precheck_cmd)
+    
+    if dry_run:
+        console.print("[bold yellow]Dry run - would execute:[/bold yellow]\n")
+        console.print("[dim]" + ' '.join(docker_cmd) + "[/dim]")
+        return
+    
+    # Run precheck
+    console.print("[cyan]Running mpw_precheck...[/cyan]")
+    console.print("[dim]This may take several minutes. Press Ctrl+C to cancel.[/dim]\n")
+    
+    try:
+        # Use Popen for better signal handling
+        process = subprocess.Popen(
+            docker_cmd,
+            cwd=str(precheck_root)
+        )
+        
+        # Wait for process to complete
+        returncode = process.wait()
+        
+        console.print("")  # Add newline
+        if returncode == 0:
+            console.print("[green]✓[/green] Precheck passed!")
+        elif returncode == -2 or returncode == 130:  # SIGINT
+            console.print("[yellow]⚠[/yellow] Precheck interrupted by user")
+        else:
+            console.print(f"[red]✗[/red] Precheck failed with exit code {returncode}")
+            console.print(f"[yellow]Check the output above for details[/yellow]")
+            
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠[/yellow] Precheck interrupted by user")
+        # Try to stop the Docker container gracefully
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except:
+            process.kill()
+    except Exception as e:
+        console.print(f"\n[red]✗[/red] Error running precheck: {e}")
+
+@main.command('verify')
+@click.argument('test', required=False)
+@click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
+@click.option('--sim', type=click.Choice(['rtl', 'gl'], case_sensitive=False), default='rtl', help='Simulation type: rtl or gl (gate-level)')
+@click.option('--list', 'list_tests', is_flag=True, help='List all available cocotb tests')
+@click.option('--all', 'run_all', is_flag=True, help='Run all tests')
+@click.option('--tag', help='Test list tag/yaml file (e.g., user_proj_tests)')
+@click.option('--dry-run', is_flag=True, help='Show the configuration without running')
+def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
+    """Run cocotb verification tests.
+    
+    Examples:
+        cf verify --list                    # List all available tests
+        cf verify counter_la                # Run a specific test (RTL)
+        cf verify counter_la --sim gl       # Run gate-level simulation
+        cf verify --all                     # Run all tests
+        cf verify --tag user_proj_tests     # Run tests from a yaml list
+    """
+    # If .cf/project.json exists in cwd, use it as default project_root
+    cwd_root, _ = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        project_root = os.getcwd()
+    
+    project_root_path = Path(project_root)
+    cocotb_dir = project_root_path / 'verilog' / 'dv' / 'cocotb'
+    venv_cocotb = project_root_path / 'venv-cocotb'
+    
+    # Check if cocotb directory exists
+    if not cocotb_dir.exists():
+        console.print(f"[red]✗[/red] Cocotb directory not found: {cocotb_dir}")
+        console.print("[yellow]This project may not have cocotb tests set up.[/yellow]")
+        return
+    
+    # Check if caravel-cocotb is installed
+    if not (venv_cocotb / 'bin' / 'caravel_cocotb').exists():
+        console.print(f"[red]✗[/red] caravel_cocotb not found in {venv_cocotb}")
+        console.print("[yellow]Run 'cf setup --only-cocotb' to install cocotb[/yellow]")
+        return
+    
+    # Find available tests
+    available_tests = []
+    available_yaml_files = []
+    
+    for item in cocotb_dir.rglob('*.yaml'):
+        yaml_name = item.stem
+        # Skip design_info.yaml and test list yamls at root of test dirs
+        if yaml_name not in ['design_info', 'user_proj_tests', 'user_proj_tests_gl']:
+            # Individual test yamls
+            available_tests.append(yaml_name)
+        else:
+            # Test list yamls
+            available_yaml_files.append(item.relative_to(cocotb_dir))
+    
+    if list_tests:
+        console.print("[bold green]Available cocotb tests:[/bold green]")
+        console.print("\n[cyan]Individual tests:[/cyan]")
+        for t in sorted(set(available_tests)):
+            console.print(f"  • {t}")
+        
+        console.print("\n[cyan]Test lists (use with --tag):[/cyan]")
+        for f in sorted(available_yaml_files):
+            console.print(f"  • {f.parent.name}/{f.name}" if f.parent.name != '.' else f" • {f.name}")
+        return
+    
+    # Determine what to run
+    if not test and not run_all and not tag:
+        console.print("[red]Error: Specify a test name, use --all, or --tag <test_list>[/red]")
+        console.print("Use 'cf verify --list' to see available tests")
+        return
+    
+    # Set up environment variables
+    caravel_root = project_root_path / 'caravel'
+    mcw_root = project_root_path / 'mgmt_core_wrapper'
+    pdk_root = project_root_path / 'dependencies' / 'pdks'
+    
+    # Detect PDK from project.json
+    pdk = 'sky130A'
+    project_json_path = project_root_path / '.cf' / 'project.json'
+    if project_json_path.exists():
+        try:
+            with open(project_json_path, 'r') as f:
+                project_data = json.load(f)
+                pdk = project_data.get('pdk', 'sky130A')
+        except:
+            pass
+    
+    # Check required paths exist
+    if not caravel_root.exists():
+        console.print(f"[red]✗[/red] Caravel not found at {caravel_root}")
+        console.print("[yellow]Run 'cf setup --only-caravel' to install[/yellow]")
+        return
+    
+    if not (pdk_root / pdk).exists():
+        console.print(f"[red]✗[/red] PDK not found at {pdk_root / pdk}")
+        console.print("[yellow]Run 'cf setup --only-pdk' to install[/yellow]")
+        return
+    
+    # Build command
+    caravel_cocotb_bin = venv_cocotb / 'bin' / 'caravel_cocotb'
+    sim_arg = 'GL' if sim.lower() == 'gl' else 'RTL'
+    
+    # Display configuration
+    console.print("\n" + "="*60)
+    console.print(f"[bold cyan]Cocotb Verification[/bold cyan]")
+    if test:
+        console.print(f"Test: [yellow]{test}[/yellow]")
+    elif run_all:
+        console.print(f"Running: [yellow]All tests[/yellow]")
+    elif tag:
+        console.print(f"Test list: [yellow]{tag}[/yellow]")
+    console.print(f"Simulation: [yellow]{sim_arg}[/yellow]")
+    console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    console.print("="*60 + "\n")
+    
+    if dry_run:
+        console.print("[bold yellow]Dry run - configuration ready[/bold yellow]\n")
+        if test:
+            console.print(f"Would run: {caravel_cocotb_bin} -t {test} -sim {sim_arg}")
+        elif run_all:
+            yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+            console.print(f"Would run: {caravel_cocotb_bin} -tl user_proj_tests/{yaml_file} -sim {sim_arg}")
+        elif tag:
+            console.print(f"Would run: {caravel_cocotb_bin} -tl {tag} -sim {sim_arg}")
+        return
+    
+    # Prepare environment
+    env = os.environ.copy()
+    env['CARAVEL_ROOT'] = str(caravel_root)
+    env['MCW_ROOT'] = str(mcw_root)
+    env['PDK_ROOT'] = str(pdk_root)
+    env['PDK'] = pdk
+    env['PROJECT_ROOT'] = str(project_root_path)
+    
+    # Build command args
+    cmd = [str(caravel_cocotb_bin)]
+    
+    if test:
+        cmd.extend(['-t', test])
+    elif run_all:
+        # Use the appropriate test list yaml
+        yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+        yaml_path = f'user_proj_tests/{yaml_file}'
+        cmd.extend(['-tl', yaml_path])
+    elif tag:
+        # User specified a custom test list
+        cmd.extend(['-tl', tag])
+    
+    if sim.lower() == 'gl':
+        cmd.extend(['-sim', 'GL'])
+    
+    # Run cocotb tests
+    console.print(f"[cyan]Running cocotb verification...[/cyan]")
+    console.print("[dim]This may take a while depending on the test complexity. Press Ctrl+C to cancel.[/dim]\n")
+    
+    try:
+        # Use Popen for better signal handling
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cocotb_dir),
+            env=env
+        )
+        
+        # Wait for process to complete
+        returncode = process.wait()
+        
+        if returncode == 0:
+            console.print(f"\n[green]✓[/green] Verification passed!")
+        elif returncode == -2 or returncode == 130:  # SIGINT
+            console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
+        else:
+            console.print(f"\n[red]✗[/red] Verification failed with exit code {returncode}")
+            console.print(f"[yellow]Check logs in: {cocotb_dir}[/yellow]")
+            
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
+        # Try to stop the process gracefully
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except:
+            process.kill()
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error: {e}")
 
