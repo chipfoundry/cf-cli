@@ -1774,7 +1774,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     if use_nix:
         # Use Nix to run LibreLane
         console.print(f"[cyan]Running LibreLane via Nix on {macro}...[/cyan]")
-        console.print("[dim]This may take a while (15-60 minutes depending on design complexity). Press Ctrl+C to cancel.[/dim]\n")
         
         cmd = [
             'nix', 'run', 'github:chipfoundry/openlane-2/CI2511', '--',
@@ -1799,7 +1798,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     else:
         # Use Docker via venv
         console.print(f"[cyan]Running LibreLane via Docker on {macro}...[/cyan]")
-        console.print("[dim]This may take a while (15-60 minutes depending on design complexity). Press Ctrl+C to cancel.[/dim]\n")
         
         # Set up environment for LibreLane
         env = os.environ.copy()
@@ -2073,7 +2071,6 @@ def precheck(project_root, disable_lvs, checks, dry_run):
     
     # Run precheck
     console.print("[cyan]Running mpw_precheck...[/cyan]")
-    console.print("[dim]This may take several minutes. Press Ctrl+C to cancel.[/dim]\n")
     
     try:
         # Use Popen for better signal handling
@@ -2267,7 +2264,6 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     
     # Run cocotb tests
     console.print(f"[cyan]Running cocotb verification...[/cyan]")
-    console.print("[dim]This may take a while depending on the test complexity. Press Ctrl+C to cancel.[/dim]\n")
     
     try:
         # Use Popen for better signal handling
