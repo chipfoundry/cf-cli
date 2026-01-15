@@ -26,6 +26,55 @@ cf --help
 
 ## Quick Start
 
+### For New Projects (Starting from Template)
+
+1. **Clone the template** (or create new directory):
+   ```bash
+   git clone https://github.com/chipfoundry/caravel_user_project my_project
+   cd my_project
+   ```
+
+2. **Set up the project** (replaces `make setup`):
+   ```bash
+   cf setup
+   ```
+
+3. **Generate SSH Key** (if you don't have one):
+   ```bash
+   cf keygen
+   ```
+
+4. **Register your key** at [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
+
+5. **Configure your credentials**:
+   ```bash
+   cf config
+   ```
+
+6. **Upload your project**:
+   ```bash
+   cf push
+   ```
+
+7. **Download results** (when available):
+   ```bash
+   cf pull
+   ```
+
+8. **View tapeout report**:
+   ```bash
+   cf view-tapeout-report
+   ```
+
+9. **Confirm final tapeout** (when ready to send GDS to foundry):
+   ```bash
+   cf confirm
+   ```
+
+### For Existing Projects
+
+If you already have a project with a Makefile:
+
 1. **Generate SSH Key** (if you don't have one):
    ```bash
    cf keygen
@@ -152,6 +201,54 @@ cf init [--project-root DIRECTORY]
 - **Interactive prompts**: Shows detected values in prompts for easy acceptance
 - Creates `.cf/project.json` with project metadata
 - **Note**: GDS hash is generated during `push`, not `init`
+
+### Setup a ChipFoundry Project
+
+```bash
+cf setup [OPTIONS]
+```
+
+**Replaces `make setup`** - Comprehensive project setup with all dependencies.
+
+**What it does:**
+1. Initializes project configuration (`.cf/project.json`)
+2. Syncs with upstream repository
+3. Installs Caravel/Caravel-Lite
+4. Sets up timing scripts
+5. Configures Cocotb testing environment
+6. Installs precheck tools
+7. Pulls Docker images for verification
+8. Runs IPM for dependency management
+
+**Key Options:**
+- `--only-init`: Just create configuration, skip installations
+- `--dry-run`: Preview actions without making changes
+- `--pdk TEXT`: Specify PDK variant (default: sky130A)
+- `--caravel-lite` / `--no-caravel-lite`: Choose Caravel variant
+- `--skip-caravel`, `--skip-openlane`, `--skip-pdk`, etc.: Skip specific installations
+- `--repo-owner`, `--repo-name`, `--branch`: Custom repository source
+
+**Examples:**
+```bash
+# Full setup (replaces make setup)
+cf setup
+
+# Quick configuration only
+cf setup --only-init
+
+# Preview what will be installed
+cf setup --dry-run
+
+# Custom PDK
+cf setup --pdk sky130B
+
+# Skip time-consuming installations
+cf setup --skip-openlane --skip-pdk
+```
+
+**See also:**
+- Detailed documentation: [docs/cf-setup.md](docs/cf-setup.md)
+- Migration guide: [docs/MIGRATION.md](docs/MIGRATION.md)
 
 ### Push a Project (Upload)
 
