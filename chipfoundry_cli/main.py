@@ -1170,7 +1170,7 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                 if mcw_dir.exists():
                     if current_version:
                         console.print(f"[cyan]Removing existing MCW (version: {current_version})...[/cyan]")
-        else:
+                    else:
                         console.print(f"[cyan]Removing existing {mcw_dir}...[/cyan]")
                     shutil.rmtree(mcw_dir)
                 
@@ -1265,7 +1265,7 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                 console.print(f"[red]✗[/red] Failed to install OpenLane: {e}")
                 if e.stderr:
                     console.print(f"[dim]{e.stderr}[/dim]")
-    except Exception as e:
+            except Exception as e:
                 maybe_abort_no_space(e, "OpenLane setup")
                 had_errors = True
                 console.print(f"[red]✗[/red] Unexpected error during OpenLane setup: {e}")
@@ -1374,7 +1374,7 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                         console.print("[green]✓[/green] PDK installed successfully")
                         console.print(f"[dim]PDK installed to: {pdk_root}[/dim]")
                 
-                    except subprocess.CalledProcessError as e:
+            except subprocess.CalledProcessError as e:
                 maybe_abort_no_space(e, "PDK install")
                 had_errors = True
                 console.print(f"[red]✗[/red] Failed to install PDK: {e}")
@@ -1400,10 +1400,10 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         elif dry_run:
             if is_installed:
                 console.print(f"[dim]Would update: {timing_repo} [--overwrite][/dim]")
-                else:
+            else:
                 console.print(f"[dim]Would clone: {timing_repo}[/dim]")
         else:
-                    try:
+            try:
                 if timing_dir.exists():
                     if overwrite:
                         console.print("[cyan]Updating existing timing-scripts...[/cyan]")
@@ -1426,12 +1426,12 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                         check=True
                     )
                     console.print("[green]✓[/green] Timing scripts installed")
-                    except subprocess.CalledProcessError as e:
+            except subprocess.CalledProcessError as e:
                 maybe_abort_no_space(e, "Timing scripts install")
                 had_errors = True
                 console.print(f"[red]✗[/red] Failed to install timing scripts: {e}")
-                        if e.stderr:
-                            console.print(f"[dim]{e.stderr}[/dim]")
+                if e.stderr:
+                    console.print(f"[dim]{e.stderr}[/dim]")
     
     # Step 7: Set up Cocotb
     if install_cocotb:
@@ -1580,8 +1580,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             console.print("[bold yellow]Setup completed with errors.[/bold yellow] Review messages above.")
         elif only_mode:
             console.print("[bold green]Installation complete![/bold green]")
-    else:
-        console.print("[bold green]Setup complete![/bold green]")
+        else:
+            console.print("[bold green]Setup complete![/bold green]")
     
 @main.command('harden')
 @click.argument('macro', required=False)
