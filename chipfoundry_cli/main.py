@@ -1495,7 +1495,7 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     pdk_root = project_root_path / 'dependencies' / 'pdks'
                     
                     subprocess.run(
-                        [sys.executable, str(setup_cocotb_script),
+                        [venv_python, str(setup_cocotb_script),
                          str(caravel_root), str(mcw_root), str(pdk_root), pdk, str(project_root_path)],
                         check=True,
                         capture_output=True
