@@ -47,10 +47,19 @@ jobs:
 
     - name: Run unit tests for all commands
       run: |
-        poetry run pytest tests/ -v --cov=chipfoundry_cli --cov-report=term-missing --cov-report=xml
+        poetry run pytest tests/ -v --cov=chipfoundry_cli --cov-report=term-missing --cov-report=json --cov-report=html
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+    - name: Upload coverage to GitHub
+      uses: actions/upload-artifact@v4
       with:
-        file: ./coverage.xml
-        fail_ci_if_error: false
+        name: coverage-report
+        path: htmlcov/
+        retention-days: 30
+
+    - name: Comment coverage summary
+      if: github.event_name == 'pull_request'
+      run: |
+        echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        poetry run pytest tests/ --cov=chipfoundry_cli --cov-report=term --quiet 2>&1 | tail -20 >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
