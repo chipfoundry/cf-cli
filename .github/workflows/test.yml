@@ -52,14 +52,14 @@ jobs:
     - name: Upload coverage to GitHub
       uses: actions/upload-artifact@v4
       with:
-        name: coverage-report
+        name: coverage-report-${{ matrix.os }}-py${{ matrix.python-version }}
         path: htmlcov/
         retention-days: 30
 
-    - name: Comment coverage summary
+    - name: Generate coverage summary
       if: github.event_name == 'pull_request'
       run: |
-        echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
+        echo "## Coverage Summary (${{ matrix.os }}, Python ${{ matrix.python-version }})" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        poetry run pytest tests/ --cov=chipfoundry_cli --cov-report=term --quiet 2>&1 | tail -20 >> $GITHUB_STEP_SUMMARY
+        poetry run pytest tests/ --cov=chipfoundry_cli --cov-report=term --quiet 2>&1 | grep -A 10 "TOTAL" >> $GITHUB_STEP_SUMMARY || echo "Coverage: See artifacts for detailed report" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
