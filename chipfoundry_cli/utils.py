@@ -1,7 +1,7 @@
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import json
 import hashlib
 import paramiko
@@ -444,6 +444,34 @@ def fetch_github_file(repo_owner: str, repo_name: str, file_path: str, branch: s
         response = client.get(url)
         response.raise_for_status()
         return response.text
+
+def fetch_versions_from_upstream(repo_owner: str = "chipfoundry", repo_name: str = "cf-cli", branch: str = "main") -> Dict:
+    """
+    Fetch version information from the cf-cli repository.
+    
+    Args:
+        repo_owner: GitHub repository owner (default: "chipfoundry")
+        repo_name: GitHub repository name (default: "cf-cli")
+        branch: Branch name (default: "main")
+    
+    Returns:
+        Dictionary with version information
+    
+    Raises:
+        httpx.HTTPError: If the request fails
+        json.JSONDecodeError: If the file is not valid JSON
+        KeyError: If required version fields are missing
+    """
+    versions_content = fetch_github_file(repo_owner, repo_name, "versions.json", branch)
+    versions = json.loads(versions_content)
+    
+    # Validate required fields
+    required_fields = ['mpw_tags', 'openlane_version', 'open_pdks_commits']
+    missing_fields = [field for field in required_fields if field not in versions]
+    if missing_fields:
+        raise KeyError(f"Missing required version fields: {', '.join(missing_fields)}")
+    
+    return versions
 
 def download_github_file(repo_owner: str, repo_name: str, file_path: str, local_path: str, branch: str = "main") -> bool:
     """

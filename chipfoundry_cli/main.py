@@ -4,7 +4,8 @@ from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
     get_config_path, load_user_config, save_user_config, GDS_TYPE_MAP,
-    open_html_in_browser, download_with_progress, update_repo_files
+    open_html_in_browser, download_with_progress, update_repo_files,
+    fetch_versions_from_upstream
 )
 import os
 from pathlib import Path
@@ -1082,6 +1083,21 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     if dry_run:
         console.print("[yellow]Dry run mode - no changes will be made[/yellow]\n")
     
+    # Fetch versions from upstream
+    console.print("[dim]Fetching version information from cf-cli repository...[/dim]")
+    try:
+        versions = fetch_versions_from_upstream("chipfoundry", "cf-cli", "main")
+        mpw_tags = versions['mpw_tags']
+        openlane_version = versions['openlane_version']
+        open_pdks_commits = versions['open_pdks_commits']
+        console.print("[green]✓[/green] Version information loaded successfully")
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to fetch version information from cf-cli repository")
+        console.print(f"[yellow]Error:[/yellow] {e}")
+        console.print("\n[yellow]Please check your internet connection and try again.[/yellow]")
+        console.print("[yellow]If the problem persists, please report this issue.[/yellow]")
+        raise click.Abort()
+    
     # Step 1: Create dependencies directory
     if not only_mode or install_timing or install_caravel:
         console.print("[bold]Step 1:[/bold] Creating dependencies directory...")
@@ -1099,10 +1115,11 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         caravel_name = 'caravel-lite' if caravel_lite else 'caravel'
         
         # Determine MPW tag based on PDK
-        mpw_tag = {
-            'sky130A': 'CC2509',
-            'sky130B': '2024.09.12-1',
-        }.get(pdk, 'CC2509')
+        if pdk not in mpw_tags:
+            console.print(f"[red]✗[/red] PDK '{pdk}' not found in version configuration")
+            console.print(f"[yellow]Available PDKs: {', '.join(mpw_tags.keys())}[/yellow]")
+            raise click.Abort()
+        mpw_tag = mpw_tags[pdk]
         
         # Caravel repository URL
         caravel_repo = f'https://github.com/chipfoundry/{caravel_name}'
@@ -1146,11 +1163,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
         mcw_dir = project_root_path / 'mgmt_core_wrapper'
         
-        # Determine MPW tag and MCW repo based on PDK
-        mpw_tag = {
-            'sky130A': 'CC2509',
-            'sky130B': '2024.09.12-1',
-        }.get(pdk, 'CC2509')
+        # Determine MPW tag and MCW repo based on PDK (from upstream or default)
+        mpw_tag = mpw_tags.get(pdk, mpw_tags.get('sky130A', 'CC2509'))
         
         mcw_name = 'mcw-litex-vexriscv'
         mcw_repo = 'https://github.com/chipfoundry/caravel_mgmt_soc_litex'
@@ -1193,13 +1207,13 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     if install_openlane:
         console.print("\n[bold]Step 4:[/bold] Installing OpenLane/LibreLane...")
         openlane_venv_dir = project_root_path / 'openlane' / '.venv'
-        openlane_version_file = project_root_path / 'openlane' / f'.version-CI2511'
+        openlane_version_file = project_root_path / 'openlane' / f'.version-{openlane_version}'
         
         # Check if already installed
         is_installed = check_python_package_installed(openlane_venv_dir, 'librelane') and openlane_version_file.exists()
         
         if is_installed and not overwrite:
-            console.print("[green]✓[/green] OpenLane/LibreLane already installed (version: CI2511)")
+            console.print(f"[green]✓[/green] OpenLane/LibreLane already installed (version: {openlane_version})")
         elif dry_run:
             if is_installed:
                 console.print("[dim]Would reinstall OpenLane/LibreLane [--overwrite][/dim]")
@@ -1235,7 +1249,7 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                 console.print("[cyan]Installing LibreLane...[/cyan]")
                 subprocess.run(
                     [venv_python, '-m', 'pip', 'install', 
-                     'https://github.com/chipfoundry/openlane-2/tarball/CI2511'],
+                     f'https://github.com/chipfoundry/openlane-2/tarball/{openlane_version}'],
                     check=True,
                     capture_output=True
                 )
@@ -1254,7 +1268,7 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                 
                 # Create version file
                 with open(openlane_version_file, 'w') as f:
-                    f.write('CI2511\n')
+                    f.write(f'{openlane_version}\n')
                 
                 console.print("[green]✓[/green] OpenLane/LibreLane installed successfully")
                 console.print("[dim]LibreLane will auto-pull Docker images when needed[/dim]")
@@ -1277,10 +1291,11 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         pdk_root = project_root_path / 'dependencies' / 'pdks'
         
         # Determine OPEN_PDKS_COMMIT based on PDK
-        open_pdks_commit = {
-            'sky130A': '3e0e31dcce8519a7dbb82590346db16d91b7244f',
-            'sky130B': '3e0e31dcce8519a7dbb82590346db16d91b7244f',
-        }.get(pdk, '3e0e31dcce8519a7dbb82590346db16d91b7244f')
+        if pdk not in open_pdks_commits:
+            console.print(f"[red]✗[/red] PDK '{pdk}' not found in version configuration")
+            console.print(f"[yellow]Available PDKs: {', '.join(open_pdks_commits.keys())}[/yellow]")
+            raise click.Abort()
+        open_pdks_commit = open_pdks_commits[pdk]
         
         pdk_version_file = pdk_root / f'.version-{open_pdks_commit[:7]}'
         
@@ -1669,6 +1684,19 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("[yellow]Run 'cf setup --only-openlane' to install LibreLane[/yellow]")
         return
     
+    # Fetch versions from upstream
+    console.print("[dim]Fetching version information from cf-cli repository...[/dim]")
+    try:
+        versions = fetch_versions_from_upstream("chipfoundry", "cf-cli", "main")
+        openlane_version = versions['openlane_version']
+        console.print("[green]✓[/green] Version information loaded successfully")
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to fetch version information from cf-cli repository")
+        console.print(f"[yellow]Error:[/yellow] {e}")
+        console.print("\n[yellow]Please check your internet connection and try again.[/yellow]")
+        console.print("[yellow]If the problem persists, please report this issue.[/yellow]")
+        raise click.Abort()
+    
     # Detect available execution method: Nix > Docker > Error
     force_nix_flag = use_nix
     force_docker_flag = use_docker
@@ -1687,7 +1715,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
             # Check if LibreLane is accessible via Nix
             try:
                 result = subprocess.run(
-                    ['nix', 'flake', 'metadata', 'github:chipfoundry/openlane-2/CI2511', '--json'],
+                    ['nix', 'flake', 'metadata', f'github:chipfoundry/openlane-2/{openlane_version}', '--json'],
                     capture_output=True,
                     timeout=5
                 )
@@ -1776,7 +1804,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print(f"[cyan]Running LibreLane via Nix on {macro}...[/cyan]")
         
         cmd = [
-            'nix', 'run', 'github:chipfoundry/openlane-2/CI2511', '--',
+            'nix', 'run', f'github:chipfoundry/openlane-2/{openlane_version}', '--',
             '--run-tag', tag,
             '--manual-pdk',
             '--pdk-root', str(pdk_root),
