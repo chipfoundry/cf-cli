@@ -2156,7 +2156,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         
         # Add --docker-no-tty if not running in a TTY (e.g., CI environments)
         try:
-            import sys
             if not sys.stdin.isatty():
                 cmd.append('--docker-no-tty')
         except:
