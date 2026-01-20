@@ -2100,6 +2100,18 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
             '-m', str(pdk_root),
             '-m', str(caravel_root),
             '--dockerized',
+        ]
+        
+        # Add --docker-no-tty if not running in a TTY (e.g., CI environments)
+        try:
+            import sys
+            if not sys.stdin.isatty():
+                cmd.append('--docker-no-tty')
+        except:
+            # If we can't detect TTY, assume non-TTY (safer for CI)
+            cmd.append('--docker-no-tty')
+        
+        cmd.extend([
             '--run-tag', tag,
             '--manual-pdk',
             '--pdk-root', str(pdk_root),
@@ -2107,7 +2119,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
             '--ef-save-views-to', str(project_root_path),
             '--overwrite',
             config_file
-        ]
+        ])
     
     # Run LibreLane
     
@@ -2576,7 +2588,22 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         cmd.extend(['-tl', yaml_path])
     elif tag:
         # User specified a custom test list
-        cmd.extend(['-tl', tag])
+        # Check if tag is a directory or file path
+        tag_path = cocotb_dir / tag
+        if tag_path.is_dir():
+            # If it's a directory, construct the YAML file path based on simulation type
+            yaml_file = f'{tag}_gl.yaml' if sim.lower() == 'gl' else f'{tag}.yaml'
+            yaml_path = f'{tag}/{yaml_file}'
+            # Verify the file exists
+            yaml_full_path = tag_path / yaml_file
+            if not yaml_full_path.exists():
+                console.print(f"[red]✗[/red] Test list file not found: {yaml_full_path}")
+                console.print(f"[yellow]Expected: {yaml_path}[/yellow]")
+                return
+            cmd.extend(['-tl', yaml_path])
+        else:
+            # It's already a file path, use it as-is
+            cmd.extend(['-tl', tag])
     
     if sim.lower() == 'gl':
         cmd.extend(['-sim', 'GL'])
