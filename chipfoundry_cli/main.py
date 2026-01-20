@@ -138,15 +138,28 @@ def get_project_json_from_cwd():
         return str(Path(os.getcwd())), project_name
     return None, None
 
-def check_project_initialized(project_root_path: Path, command_name: str):
+def check_project_initialized(project_root_path: Path, command_name: str, dry_run: bool = False, allow_graceful: bool = False):
     """
     Check if project is initialized (has .cf/project.json).
     Raises click.Abort with helpful message if not initialized.
+    
+    Args:
+        project_root_path: Path to project root
+        command_name: Name of the command (for error messages)
+        dry_run: If True, allows dry-run mode to proceed without initialization
+        allow_graceful: If True, returns False instead of raising Abort (for commands that should return 0 on error)
     """
     project_json_path = project_root_path / '.cf' / 'project.json'
     if not project_json_path.exists():
+        if allow_graceful:
+            return False
+        if dry_run:
+            # In dry-run mode, allow to proceed but warn
+            console.print(f"[yellow]⚠ Project not initialized. Run 'cf init' first for full functionality.[/yellow]")
+            return True
         console.print(f"[red]✗ Project not initialized. Please run 'cf init' first.[/red]")
         raise click.Abort()
+    return True
 
 @click.group(help="ChipFoundry CLI: Automate project submission and management.")
 @click.version_option(importlib.metadata.version("chipfoundry-cli"), "-v", "--version", message="%(version)s")
@@ -337,10 +350,46 @@ def gpio_config(project_root):
     
     project_root = Path(project_root)
     
-    # Check if project is initialized
-    check_project_initialized(project_root, 'gpio-config')
-    
     project_json_path = project_root / '.cf' / 'project.json'
+    
+    # Auto-initialize if project.json doesn't exist
+    if not project_json_path.exists():
+        console.print("[yellow]Project not initialized. Auto-initializing...[/yellow]")
+        cf_dir = project_root / '.cf'
+        cf_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get username from user config
+        config = load_user_config()
+        username = config.get("sftp_username", "unknown")
+        
+        # Auto-detect project type from GDS file name
+        gds_dir = project_root / 'gds'
+        gds_type = None
+        for gds_name, gtype in GDS_TYPE_MAP.items():
+            if (gds_dir / gds_name).exists():
+                gds_type = gtype
+                break
+        
+        # Default project name to directory name
+        default_name = Path(project_root).name
+        
+        # Default project type
+        project_type = gds_type if gds_type else 'digital'
+        
+        # Create minimal project.json
+        data = {
+            "project": {
+                "name": default_name,
+                "type": project_type,
+                "user": username,
+                "version": "1",
+                "user_project_wrapper_hash": "",
+                "submission_state": "Draft"
+            }
+        }
+        with open(project_json_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        console.print(f"[green]Auto-initialized project at {project_json_path}[/green]")
     
     # Load project type from project.json
     with open(project_json_path, 'r') as f:
@@ -1259,8 +1308,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     
     project_root_path = Path(project_root)
     
-    # Check if project is initialized
-    check_project_initialized(project_root_path, 'setup')
+    # Check if project is initialized (allow dry-run to proceed)
+    check_project_initialized(project_root_path, 'setup', dry_run=dry_run)
     
     had_errors = False
 
@@ -1871,9 +1920,12 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     
     project_root_path = Path(project_root)
     
-    # Check if project is initialized (skip check for --list)
+    # Check if project is initialized (skip check for --list, allow graceful return)
     if not list_designs:
-        check_project_initialized(project_root_path, 'harden')
+        if not check_project_initialized(project_root_path, 'harden', dry_run=dry_run, allow_graceful=True):
+            console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
+            console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
+            return
     
     openlane_dir = project_root_path / 'openlane'
     
@@ -1932,7 +1984,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     if not librelane_venv.exists():
         console.print("[red]✗[/red] LibreLane not installed")
         console.print("[yellow]Run 'cf setup --only-openlane' to install LibreLane[/yellow]")
-        sys.exit(1)
+        raise click.Abort()
     
     # Fetch versions from upstream
     console.print("[dim]Fetching version information from cf-cli repository...[/dim]")
@@ -1976,7 +2028,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         if force_nix_flag and not use_nix:
             console.print("[red]✗[/red] Nix not available or cannot access LibreLane flake")
             console.print("[yellow]Install Nix from: https://librelane.readthedocs.io[/yellow]")
-            sys.exit(1)
+            raise click.Abort()
     
     # Check if Docker is available
     if not use_nix and (force_docker_flag or not force_nix_flag):
@@ -1993,7 +2045,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         if force_docker_flag and not use_docker:
             console.print("[red]✗[/red] Docker not available")
             console.print("[yellow]Install Docker from: https://docker.com[/yellow]")
-            sys.exit(1)
+            raise click.Abort()
     
     # Error if neither is available
     if not use_nix and not use_docker:
@@ -2002,7 +2054,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("  1. [cyan]Nix[/cyan] - Install from: https://librelane.readthedocs.io")
         console.print("  2. [cyan]Docker[/cyan] - Install from: https://docker.com")
         console.print("\nAfter installing either one, try again.")
-        sys.exit(1)
+        raise click.Abort()
     
     execution_method = "Nix" if use_nix else "Docker"
     
@@ -2258,8 +2310,11 @@ def precheck(project_root, disable_lvs, checks, dry_run):
     
     project_root_path = Path(project_root)
     
-    # Check if project is initialized
-    check_project_initialized(project_root_path, 'precheck')
+    # Check if project is initialized (allow graceful return)
+    if not check_project_initialized(project_root_path, 'precheck', dry_run=dry_run, allow_graceful=True):
+        console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
+        console.print("[yellow]Dependencies are required before running precheck.[/yellow]")
+        return
     
     project_json_path = project_root_path / '.cf' / 'project.json'
     
@@ -2450,9 +2505,12 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     
     project_root_path = Path(project_root)
     
-    # Check if project is initialized (skip check if just listing tests)
+    # Check if project is initialized (skip check if just listing tests, allow graceful return)
     if not list_tests:
-        check_project_initialized(project_root_path, 'verify')
+        if not check_project_initialized(project_root_path, 'verify', dry_run=dry_run, allow_graceful=True):
+            console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
+            console.print("[yellow]Cocotb tests require project initialization.[/yellow]")
+            return
     
     project_json_path = project_root_path / '.cf' / 'project.json'
     
