@@ -569,40 +569,41 @@ def gpio_config(project_root):
             console.print(f"[green]✓ Updated {user_defines_path}[/green]")
             
             # Run gen_gpio_defaults.py script after updating user_defines.v
+            # DISABLED: Removed by default due to file path issues
             # Look for caravel directory in common locations
-            caravel_paths = [
-                project_root / 'caravel',
-                project_root / 'dependencies' / 'caravel',
-                project_root.parent / 'caravel',  # If caravel is sibling to project
-            ]
-            
-            gen_gpio_script = None
-            for caravel_path in caravel_paths:
-                script_path = caravel_path / 'scripts' / 'gen_gpio_defaults.py'
-                if script_path.exists():
-                    gen_gpio_script = script_path
-                    break
-            
-            if gen_gpio_script:
-                try:
-                    console.print("[cyan]Generating GPIO defaults for simulation...[/cyan]")
-                    result = subprocess.run(
-                        [sys.executable, str(gen_gpio_script)],
-                        cwd=str(project_root),
-                        capture_output=True,
-                        text=True,
-                        check=True
-                    )
-                    console.print(f"[green]✓ Generated GPIO defaults[/green]")
-                except subprocess.CalledProcessError as e:
-                    console.print(f"[yellow]Warning: Failed to run gen_gpio_defaults.py: {e}[/yellow]")
-                    if e.stderr:
-                        console.print(f"[dim]{e.stderr}[/dim]")
-                except Exception as e:
-                    console.print(f"[yellow]Warning: Error running gen_gpio_defaults.py: {e}[/yellow]")
-            else:
-                console.print("[dim]Note: gen_gpio_defaults.py not found. Caravel may not be installed yet.[/dim]")
-                console.print("[dim]Run 'cf setup' to install Caravel, or run the script manually after setup.[/dim]")
+            # caravel_paths = [
+            #     project_root / 'caravel',
+            #     project_root / 'dependencies' / 'caravel',
+            #     project_root.parent / 'caravel',  # If caravel is sibling to project
+            # ]
+            # 
+            # gen_gpio_script = None
+            # for caravel_path in caravel_paths:
+            #     script_path = caravel_path / 'scripts' / 'gen_gpio_defaults.py'
+            #     if script_path.exists():
+            #         gen_gpio_script = script_path
+            #         break
+            # 
+            # if gen_gpio_script:
+            #     try:
+            #         console.print("[cyan]Generating GPIO defaults for simulation...[/cyan]")
+            #         result = subprocess.run(
+            #             [sys.executable, str(gen_gpio_script)],
+            #             cwd=str(project_root),
+            #             capture_output=True,
+            #             text=True,
+            #             check=True
+            #         )
+            #         console.print(f"[green]✓ Generated GPIO defaults[/green]")
+            #     except subprocess.CalledProcessError as e:
+            #         console.print(f"[yellow]Warning: Failed to run gen_gpio_defaults.py: {e}[/yellow]")
+            #         if e.stderr:
+            #             console.print(f"[dim]{e.stderr}[/dim]")
+            #     except Exception as e:
+            #         console.print(f"[yellow]Warning: Error running gen_gpio_defaults.py: {e}[/yellow]")
+            # else:
+            #     console.print("[dim]Note: gen_gpio_defaults.py not found. Caravel may not be installed yet.[/dim]")
+            #     console.print("[dim]Run 'cf setup' to install Caravel, or run the script manually after setup.[/dim]")
         except Exception as e:
             console.print(f"[red]Error updating user_defines.v: {e}[/red]")
 
