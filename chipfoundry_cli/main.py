@@ -1932,7 +1932,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     if not librelane_venv.exists():
         console.print("[red]✗[/red] LibreLane not installed")
         console.print("[yellow]Run 'cf setup --only-openlane' to install LibreLane[/yellow]")
-        return
+        sys.exit(1)
     
     # Fetch versions from upstream
     console.print("[dim]Fetching version information from cf-cli repository...[/dim]")
@@ -1976,7 +1976,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         if force_nix_flag and not use_nix:
             console.print("[red]✗[/red] Nix not available or cannot access LibreLane flake")
             console.print("[yellow]Install Nix from: https://librelane.readthedocs.io[/yellow]")
-            return
+            sys.exit(1)
     
     # Check if Docker is available
     if not use_nix and (force_docker_flag or not force_nix_flag):
@@ -1993,7 +1993,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         if force_docker_flag and not use_docker:
             console.print("[red]✗[/red] Docker not available")
             console.print("[yellow]Install Docker from: https://docker.com[/yellow]")
-            return
+            sys.exit(1)
     
     # Error if neither is available
     if not use_nix and not use_docker:
@@ -2002,7 +2002,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("  1. [cyan]Nix[/cyan] - Install from: https://librelane.readthedocs.io")
         console.print("  2. [cyan]Docker[/cyan] - Install from: https://docker.com")
         console.print("\nAfter installing either one, try again.")
-        return
+        sys.exit(1)
     
     execution_method = "Nix" if use_nix else "Docker"
     
@@ -2140,9 +2140,11 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
             console.print(f"[dim]Results saved to: {project_root_path}/runs/{macro}/{tag}/[/dim]")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
+            sys.exit(130)
         else:
             console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {returncode}[/bold red]")
             console.print(f"[yellow]Check logs in: {project_root_path}/runs/{macro}/{tag}/[/yellow]")
+            sys.exit(returncode)
             
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
@@ -2397,9 +2399,11 @@ def precheck(project_root, disable_lvs, checks, dry_run):
             console.print("[green]✓[/green] Precheck passed!")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("[yellow]⚠[/yellow] Precheck interrupted by user")
+            sys.exit(130)
         else:
             console.print(f"[red]✗[/red] Precheck failed with exit code {returncode}")
             console.print(f"[yellow]Check the output above for details[/yellow]")
+            sys.exit(returncode)
             
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Precheck interrupted by user")
@@ -2533,12 +2537,12 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     if not caravel_root.exists():
         console.print(f"[red]✗[/red] Caravel not found at {caravel_root}")
         console.print("[yellow]Run 'cf setup --only-caravel' to install[/yellow]")
-        return
+        sys.exit(1)
     
     if not (pdk_root / pdk).exists():
         console.print(f"[red]✗[/red] PDK not found at {pdk_root / pdk}")
         console.print("[yellow]Run 'cf setup --only-pdk' to install[/yellow]")
-        return
+        sys.exit(1)
     
     # Build command
     caravel_cocotb_bin = venv_cocotb / 'bin' / 'caravel_cocotb'
@@ -2599,7 +2603,7 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
             if not yaml_full_path.exists():
                 console.print(f"[red]✗[/red] Test list file not found: {yaml_full_path}")
                 console.print(f"[yellow]Expected: {yaml_path}[/yellow]")
-                return
+                sys.exit(1)
             cmd.extend(['-tl', yaml_path])
         else:
             # It's already a file path, use it as-is
@@ -2627,9 +2631,11 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
             console.print(f"\n[green]✓[/green] Verification passed!")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
+            sys.exit(130)
         else:
             console.print(f"\n[red]✗[/red] Verification failed with exit code {returncode}")
             console.print(f"[yellow]Check logs in: {cocotb_dir}[/yellow]")
+            sys.exit(returncode)
             
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
