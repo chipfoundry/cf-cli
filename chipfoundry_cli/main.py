@@ -1581,7 +1581,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     # Step 5: Install PDK with Ciel
     if install_pdk:
         console.print("\n[bold]Step 5:[/bold] Installing PDK with Ciel...")
-        caravel_venv_dir = project_root_path / 'caravel' / 'venv'
+        # Use a dedicated venv location independent of Caravel
+        ciel_venv_dir = project_root_path / 'dependencies' / 'ciel-venv'
         pdk_root = project_root_path / 'dependencies' / 'pdks'
         
         # Determine OPEN_PDKS_COMMIT based on PDK
@@ -1595,7 +1596,7 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         
         # Check if already installed
         is_installed = (
-            check_python_package_installed(caravel_venv_dir, 'ciel') and
+            check_python_package_installed(ciel_venv_dir, 'ciel') and
             pdk_version_file.exists() and
             (pdk_root / pdk).exists()
         )
@@ -1609,79 +1610,78 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                 console.print(f"[dim]Would install PDK {pdk} using Ciel[/dim]")
         else:
             try:
-                # Check if caravel directory exists
-                caravel_dir = project_root_path / 'caravel'
-                if not caravel_dir.exists():
-                    console.print("[yellow]Warning: Caravel not found. Install caravel first.[/yellow]")
-                    console.print("[cyan]Run: cf setup --only-caravel[/cyan]")
-                else:
-                    # Remove existing venv if overwriting or doesn't exist
-                    if caravel_venv_dir.exists() and (overwrite or not is_installed):
-                        console.print("[cyan]Removing existing Ciel venv...[/cyan]")
-                        shutil.rmtree(caravel_venv_dir)
+                # Ensure dependencies directory exists
+                dependencies_dir = project_root_path / 'dependencies'
+                dependencies_dir.mkdir(exist_ok=True)
+                
+                # Remove existing venv if overwriting or doesn't exist
+                if ciel_venv_dir.exists() and (overwrite or not is_installed):
+                    console.print("[cyan]Removing existing Ciel venv...[/cyan]")
+                    shutil.rmtree(ciel_venv_dir)
+                
+                if not ciel_venv_dir.exists():
+                    console.print("[cyan]Creating Ciel virtual environment...[/cyan]")
+                    subprocess.run(
+                        [sys.executable, '-m', 'venv', str(ciel_venv_dir)],
+                        check=True,
+                        capture_output=True
+                    )
                     
-                    if not caravel_venv_dir.exists():
-                        console.print("[cyan]Creating Ciel virtual environment...[/cyan]")
-                        subprocess.run(
-                            [sys.executable, '-m', 'venv', str(caravel_venv_dir)],
-                            check=True,
-                            capture_output=True
-                        )
-                        
-                        venv_python = str(caravel_venv_dir / 'bin' / 'python3')
-                        
-                        console.print("[cyan]Installing Ciel...[/cyan]")
-                        subprocess.run(
-                            [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'pip'],
-                            check=True,
-                            capture_output=True
-                        )
-                        subprocess.run(
-                            [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'ciel'],
-                            check=True,
-                            capture_output=True
-                        )
-                        console.print("[green]✓[/green] Ciel installed successfully")
+                    venv_python = str(ciel_venv_dir / 'bin' / 'python3')
                     
-                    # Remove existing PDK if overwriting
-                    if (pdk_root / pdk).exists() and overwrite:
-                        console.print(f"[cyan]Removing existing PDK {pdk}...[/cyan]")
-                        shutil.rmtree(pdk_root / pdk)
+                    console.print("[cyan]Installing Ciel...[/cyan]")
+                    subprocess.run(
+                        [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'pip'],
+                        check=True,
+                        capture_output=True
+                    )
+                    subprocess.run(
+                        [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'ciel'],
+                        check=True,
+                        capture_output=True
+                    )
+                    console.print("[green]✓[/green] Ciel installed successfully")
+                
+                # Remove existing PDK if overwriting
+                if (pdk_root / pdk).exists() and overwrite:
+                    console.print(f"[cyan]Removing existing PDK {pdk}...[/cyan]")
+                    shutil.rmtree(pdk_root / pdk)
+                
+                if not (pdk_root / pdk).exists():
+                    console.print(f"[cyan]Enabling PDK {pdk} with Ciel...[/cyan]")
+                    console.print("[dim]Downloading and installing PDK files...[/dim]")
                     
+                    # Determine PDK family from PDK variant (sky130A/sky130B -> sky130)
+                    pdk_family = pdk.rstrip('AB')  # Remove A or B suffix
+                    
+                    ciel_bin = str(ciel_venv_dir / 'bin' / 'ciel')
+                    
+                    # Set up environment with PDK_ROOT
+                    env = os.environ.copy()
+                    env['PDK_ROOT'] = str(pdk_root)
+                    env['CIEL_DATA_SOURCE'] = 'static-web:https://chipfoundry.github.io/ciel-releases'
+                    
+                    # Run from project root instead of caravel directory
+                    result = subprocess.run(
+                        [ciel_bin, 'enable', '--pdk-family', pdk_family, open_pdks_commit],
+                        cwd=str(project_root_path),
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=True
+                    )
+                    
+                    # Verify PDK was actually installed
                     if not (pdk_root / pdk).exists():
-                        console.print(f"[cyan]Enabling PDK {pdk} with Ciel...[/cyan]")
-                        console.print("[dim]Downloading and installing PDK files...[/dim]")
-                        
-                        # Determine PDK family from PDK variant (sky130A/sky130B -> sky130)
-                        pdk_family = pdk.rstrip('AB')  # Remove A or B suffix
-                        
-                        ciel_bin = str(caravel_venv_dir / 'bin' / 'ciel')
-                        
-                        # Set up environment with PDK_ROOT
-                        env = os.environ.copy()
-                        env['PDK_ROOT'] = str(pdk_root)
-                        env['CIEL_DATA_SOURCE'] = 'static-web:https://chipfoundry.github.io/ciel-releases'
-                        
-                        result = subprocess.run(
-                            [ciel_bin, 'enable', '--pdk-family', pdk_family, open_pdks_commit],
-                            cwd=str(caravel_dir),
-                            env=env,
-                            capture_output=True,
-                            text=True,
-                            check=True
-                        )
-                        
-                        # Verify PDK was actually installed
-                        if not (pdk_root / pdk).exists():
-                            raise Exception(f"PDK directory {pdk_root / pdk} was not created by Ciel")
-                        
-                        # Create version file only if PDK exists
-                        pdk_root.mkdir(parents=True, exist_ok=True)
-                        with open(pdk_version_file, 'w') as f:
-                            f.write(f'{open_pdks_commit}\n')
-                        
-                        console.print("[green]✓[/green] PDK installed successfully")
-                        console.print(f"[dim]PDK installed to: {pdk_root}[/dim]")
+                        raise Exception(f"PDK directory {pdk_root / pdk} was not created by Ciel")
+                    
+                    # Create version file only if PDK exists
+                    pdk_root.mkdir(parents=True, exist_ok=True)
+                    with open(pdk_version_file, 'w') as f:
+                        f.write(f'{open_pdks_commit}\n')
+                    
+                    console.print("[green]✓[/green] PDK installed successfully")
+                    console.print(f"[dim]PDK installed to: {pdk_root}[/dim]")
                 
             except subprocess.CalledProcessError as e:
                 maybe_abort_no_space(e, "PDK install")
@@ -2059,7 +2059,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     execution_method = "Nix" if use_nix else "Docker"
     
     # Set up environment variables
-    caravel_root = project_root_path / 'caravel'
     pdk_root = project_root_path / 'dependencies' / 'pdks'
     
     if not pdk:
@@ -2119,7 +2118,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         env = os.environ.copy()
         env.update({
             'PROJECT_ROOT': str(project_root_path),
-            'CARAVEL_ROOT': str(caravel_root),
             'PDK_ROOT': str(pdk_root),
             'PDK': pdk,
             'LIBRELANE_RUN_TAG': tag,
@@ -2133,7 +2131,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         env = os.environ.copy()
         env.update({
             'PROJECT_ROOT': str(project_root_path),
-            'CARAVEL_ROOT': str(caravel_root),
             'PDK_ROOT': str(pdk_root),
             'PDK': pdk,
             'LIBRELANE_RUN_TAG': tag,
@@ -2150,7 +2147,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
             str(venv_bin / 'python3'), '-m', 'librelane',
             '-m', str(project_root_path),
             '-m', str(pdk_root),
-            '-m', str(caravel_root),
             '--dockerized',
         ]
         
