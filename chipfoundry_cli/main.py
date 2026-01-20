@@ -5,7 +5,9 @@ from chipfoundry_cli.utils import (
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
     get_config_path, load_user_config, save_user_config, GDS_TYPE_MAP,
     open_html_in_browser, download_with_progress, update_repo_files,
-    fetch_versions_from_upstream
+    fetch_versions_from_upstream, parse_user_defines_v, update_user_defines_v,
+    get_gpio_config_from_project_json, save_gpio_config_to_project_json,
+    GPIO_MODES, GPIO_MODE_DESCRIPTIONS
 )
 import os
 from pathlib import Path
@@ -135,6 +137,16 @@ def get_project_json_from_cwd():
         project_name = data.get('project', {}).get('name')
         return str(Path(os.getcwd())), project_name
     return None, None
+
+def check_project_initialized(project_root_path: Path, command_name: str):
+    """
+    Check if project is initialized (has .cf/project.json).
+    Raises click.Abort with helpful message if not initialized.
+    """
+    project_json_path = project_root_path / '.cf' / 'project.json'
+    if not project_json_path.exists():
+        console.print(f"[red]✗ Project not initialized. Please run 'cf init' first.[/red]")
+        raise click.Abort()
 
 @click.group(help="ChipFoundry CLI: Automate project submission and management.")
 @click.version_option(importlib.metadata.version("chipfoundry-cli"), "-v", "--version", message="%(version)s")
@@ -315,6 +327,235 @@ def init(project_root):
     with open(project_json_path, 'w') as f:
         json.dump(data, f, indent=2)
     console.print(f"[green]Initialized project at {project_json_path}[/green]")
+
+@main.command('gpio-config')
+@click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
+def gpio_config(project_root):
+    """Configure GPIO settings interactively and save to project config and user_defines.v."""
+    if not project_root:
+        project_root = os.getcwd()
+    
+    project_root = Path(project_root)
+    
+    # Check if project is initialized
+    check_project_initialized(project_root, 'gpio-config')
+    
+    project_json_path = project_root / '.cf' / 'project.json'
+    
+    # Load project type from project.json
+    with open(project_json_path, 'r') as f:
+        project_data = json.load(f)
+    project_type = project_data.get('project', {}).get('type', 'digital')
+    
+    # For openframe, GPIO config is not needed
+    if project_type == 'openframe':
+        console.print("[red]✗ GPIO configuration is not available for openframe projects.[/red]")
+        console.print("[yellow]Openframe projects do not use user_defines.v.[/yellow]")
+        raise click.Abort()
+    
+    user_defines_path = project_root / 'verilog' / 'rtl' / 'user_defines.v'
+    
+    # Load existing GPIO configs from project.json or user_defines.v
+    existing_configs = get_gpio_config_from_project_json(str(project_json_path))
+    if not existing_configs and user_defines_path.exists():
+        # Try to parse from user_defines.v
+        existing_configs = parse_user_defines_v(str(user_defines_path))
+    
+    # Determine GPIO range based on project type
+    if project_type == 'analog':  # caravan
+        # Caravan: GPIO 5-13 and 25-37 (GPIO 14-24 not available)
+        # User sees: 5-13, then 14-26 (which map to 25-37 internally)
+        available_gpios = list(range(5, 14)) + list(range(25, 38))
+        user_to_real_map = {}
+        user_num = 5
+        for real_gpio in available_gpios:
+            user_to_real_map[user_num] = real_gpio
+            user_num += 1
+        real_to_user_map = {v: k for k, v in user_to_real_map.items()}
+        console.print("\n[bold cyan]GPIO Configuration (Caravan)[/bold cyan]")
+        console.print("Configure GPIO pins 5-13, then 14-26 (GPIO 0-4 are fixed system pins)\n")
+        console.print("[dim]Note: GPIO 14-24 are not available in Caravan. Numbers 14-26 map to GPIO 25-37.[/dim]\n")
+    else:  # digital (caravel)
+        # Caravel: GPIO 5-37 all available
+        available_gpios = list(range(5, 38))
+        user_to_real_map = {gpio: gpio for gpio in available_gpios}
+        real_to_user_map = {gpio: gpio for gpio in available_gpios}
+        console.print("\n[bold cyan]GPIO Configuration (Caravel)[/bold cyan]")
+        console.print("Configure GPIO pins 5-37 (GPIO 0-4 are fixed system pins)\n")
+    
+    # Create a list of GPIO mode options for selection, excluding "invalid"
+    mode_options = [key for key in GPIO_MODES.keys() if key != "invalid"]
+    
+    # Show modes in a more compact table format
+    table = Table(title="Available GPIO Modes", show_header=True, header_style="bold cyan")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Key", style="cyan", width=20)
+    table.add_column("Description", style="white")
+    
+    for i, key in enumerate(mode_options, 1):
+        table.add_row(str(i), key, GPIO_MODE_DESCRIPTIONS[key])
+    
+    console.print(table)
+    console.print("[dim]Tip: Enter number or full key. [/dim]\n")
+    
+    gpio_configs = {}
+    
+    # Helper function to find mode key from mode name or hex value
+    def find_mode_key(mode_value):
+        """Find the mode key for a given mode value."""
+        if not mode_value:
+            return None
+        # Direct match
+        for key, mode_name in GPIO_MODES.items():
+            if mode_name == mode_value:
+                # Don't return "invalid" if it's not in our selectable options
+                if key != "invalid":
+                    return key
+        # Check if it's a hex value or invalid - return None to indicate invalid
+        if mode_value.startswith('0x') or mode_value.startswith("13'h") or 'INVALID' in mode_value:
+            return None  # Don't show "invalid", just show no default
+        return None
+    
+    # Helper function to check if a mode is invalid
+    def is_invalid_mode(mode_value):
+        """Check if a mode value is invalid."""
+        if not mode_value:
+            return True
+        if mode_value == GPIO_MODES.get("invalid"):
+            return True
+        if mode_value.startswith('0x') or mode_value.startswith("13'h") or 'INVALID' in mode_value:
+            return True
+        return False
+    
+    # Helper function to find matching mode by partial input
+    def find_matching_mode(user_input):
+        """Find mode that matches user input (partial match or full key)."""
+        user_input_lower = user_input.lower()
+        
+        # Check for exact key match
+        if user_input in mode_options:
+            return user_input
+        
+        # Check for partial matches (case-insensitive)
+        matches = [key for key in mode_options if key.lower().startswith(user_input_lower)]
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            # Multiple matches - return list so we can show them
+            return matches
+        
+        return None
+    
+    # Configure each available GPIO
+    for user_gpio_num in sorted(user_to_real_map.keys()):
+        real_gpio_num = user_to_real_map[user_gpio_num]
+        
+        # Get current value if exists (using real GPIO number)
+        current_mode = existing_configs.get(real_gpio_num) if existing_configs else None
+        detected_key = find_mode_key(current_mode) if current_mode else None
+        is_invalid = is_invalid_mode(current_mode)
+        
+        # Show GPIO number with mapping info for caravan
+        gpio_display = f"GPIO {user_gpio_num}"
+        if project_type == 'analog' and user_gpio_num >= 14:
+            # Show the real GPIO number for caravan
+            gpio_display = f"GPIO {user_gpio_num} (GPIO {real_gpio_num})"
+        
+        # Build prompt with detected default (only show if valid)
+        if detected_key and not is_invalid:
+            prompt_text = f"{gpio_display} ([cyan]{detected_key}[/cyan]): "
+        else:
+            prompt_text = f"{gpio_display}: "
+        
+        while True:
+            user_input = console.input(prompt_text).strip()
+            
+            if not user_input:
+                # If current mode is invalid, require input
+                if is_invalid_mode(current_mode):
+                    console.print(f"[red]{gpio_display} is currently invalid. Please enter a valid mode (1-{len(mode_options)} or mode key).[/red]")
+                    continue
+                # Use current value if user just presses enter and we have a valid one
+                if current_mode:
+                    gpio_configs[real_gpio_num] = current_mode
+                    break
+                else:
+                    # No current value and no input - require input
+                    console.print(f"[red]{gpio_display} has no configuration. Please enter a valid mode (1-{len(mode_options)} or mode key).[/red]")
+                    continue
+            elif user_input.isdigit():
+                # User selected by number
+                choice_num = int(user_input)
+                if 1 <= choice_num <= len(mode_options):
+                    selected_key = mode_options[choice_num - 1]
+                    gpio_configs[real_gpio_num] = GPIO_MODES[selected_key]
+                    break
+                else:
+                    console.print(f"[red]Invalid choice. Please enter 1-{len(mode_options)}.[/red]")
+            else:
+                # Try to find matching mode
+                match_result = find_matching_mode(user_input)
+                
+                if match_result is None:
+                    console.print(f"[red]No match found for '{user_input}'. Try a number (1-{len(mode_options)}), partial key, or full key.[/red]")
+                elif isinstance(match_result, list):
+                    # Multiple matches found
+                    console.print(f"[yellow]Multiple matches found: {', '.join(match_result)}[/yellow]")
+                    console.print(f"[dim]Please be more specific or use a number (1-{len(mode_options)}).[/dim]")
+                else:
+                    # Single match found
+                    gpio_configs[real_gpio_num] = GPIO_MODES[match_result]
+                    break
+    
+    # Save to project.json
+    save_gpio_config_to_project_json(str(project_json_path), gpio_configs)
+    console.print(f"\n[green]✓ GPIO configuration saved to {project_json_path}[/green]")
+    
+    # Update user_defines.v
+    if not user_defines_path.exists():
+        console.print(f"[yellow]Warning: {user_defines_path} not found. Skipping file update.[/yellow]")
+    else:
+        try:
+            update_user_defines_v(str(user_defines_path), gpio_configs)
+            console.print(f"[green]✓ Updated {user_defines_path}[/green]")
+            
+            # Run gen_gpio_defaults.py script after updating user_defines.v
+            # Look for caravel directory in common locations
+            caravel_paths = [
+                project_root / 'caravel',
+                project_root / 'dependencies' / 'caravel',
+                project_root.parent / 'caravel',  # If caravel is sibling to project
+            ]
+            
+            gen_gpio_script = None
+            for caravel_path in caravel_paths:
+                script_path = caravel_path / 'scripts' / 'gen_gpio_defaults.py'
+                if script_path.exists():
+                    gen_gpio_script = script_path
+                    break
+            
+            if gen_gpio_script:
+                try:
+                    console.print("[cyan]Generating GPIO defaults for simulation...[/cyan]")
+                    result = subprocess.run(
+                        [sys.executable, str(gen_gpio_script)],
+                        cwd=str(project_root),
+                        capture_output=True,
+                        text=True,
+                        check=True
+                    )
+                    console.print(f"[green]✓ Generated GPIO defaults[/green]")
+                except subprocess.CalledProcessError as e:
+                    console.print(f"[yellow]Warning: Failed to run gen_gpio_defaults.py: {e}[/yellow]")
+                    if e.stderr:
+                        console.print(f"[dim]{e.stderr}[/dim]")
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Error running gen_gpio_defaults.py: {e}[/yellow]")
+            else:
+                console.print("[dim]Note: gen_gpio_defaults.py not found. Caravel may not be installed yet.[/dim]")
+                console.print("[dim]Run 'cf setup' to install Caravel, or run the script manually after setup.[/dim]")
+        except Exception as e:
+            console.print(f"[red]Error updating user_defines.v: {e}[/red]")
 
 @main.command('push')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
@@ -1017,6 +1258,10 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         project_root = os.getcwd()
     
     project_root_path = Path(project_root)
+    
+    # Check if project is initialized
+    check_project_initialized(project_root_path, 'setup')
+    
     had_errors = False
 
     def _error_text(err):
@@ -1625,6 +1870,11 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         project_root = os.getcwd()
     
     project_root_path = Path(project_root)
+    
+    # Check if project is initialized (skip check for --list)
+    if not list_designs:
+        check_project_initialized(project_root_path, 'harden')
+    
     openlane_dir = project_root_path / 'openlane'
     
     # Check if openlane directory exists
@@ -1993,12 +2243,31 @@ def precheck(project_root, disable_lvs, checks, dry_run):
         project_root = os.getcwd()
     
     project_root_path = Path(project_root)
+    
+    # Check if project is initialized
+    check_project_initialized(project_root_path, 'precheck')
+    
+    project_json_path = project_root_path / '.cf' / 'project.json'
+    
+    # Check project type - GPIO config not needed for openframe
+    with open(project_json_path, 'r') as f:
+        project_data = json.load(f)
+    project_type = project_data.get('project', {}).get('type', 'digital')
+    
+    # Check if GPIO configuration exists (not needed for openframe)
+    if project_type != 'openframe':
+        gpio_config = get_gpio_config_from_project_json(str(project_json_path))
+        if not gpio_config or len(gpio_config) == 0:
+            console.print("[red]✗[/red] GPIO configuration not found in project.json")
+            console.print("[yellow]GPIO configuration is required before running precheck.[/yellow]")
+            console.print("[cyan]Please run 'cf gpio-config' to configure GPIO settings first.[/cyan]")
+            raise click.Abort()
+    
     precheck_root = Path.home() / 'mpw_precheck'
     pdk_root = project_root_path / 'dependencies' / 'pdks'
     
     # Detect PDK from project.json
     pdk = 'sky130A'
-    project_json_path = project_root_path / '.cf' / 'project.json'
     if project_json_path.exists():
         try:
             with open(project_json_path, 'r') as f:
@@ -2164,6 +2433,28 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         project_root = os.getcwd()
     
     project_root_path = Path(project_root)
+    
+    # Check if project is initialized (skip check if just listing tests)
+    if not list_tests:
+        check_project_initialized(project_root_path, 'verify')
+    
+    project_json_path = project_root_path / '.cf' / 'project.json'
+    
+    # Check if GPIO configuration exists (skip check if just listing tests or openframe)
+    if not list_tests:
+        # Check project type - GPIO config not needed for openframe
+        with open(project_json_path, 'r') as f:
+            project_data = json.load(f)
+        project_type = project_data.get('project', {}).get('type', 'digital')
+        
+        if project_type != 'openframe':
+            gpio_config = get_gpio_config_from_project_json(str(project_json_path))
+            if not gpio_config or len(gpio_config) == 0:
+                console.print("[red]✗[/red] GPIO configuration not found in project.json")
+                console.print("[yellow]GPIO configuration is required before running verification.[/yellow]")
+                console.print("[cyan]Please run 'cf gpio-config' to configure GPIO settings first.[/cyan]")
+                raise click.Abort()
+    
     cocotb_dir = project_root_path / 'verilog' / 'dv' / 'cocotb'
     venv_cocotb = project_root_path / 'venv-cocotb'
     

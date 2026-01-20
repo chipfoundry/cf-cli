@@ -8,6 +8,7 @@ import paramiko
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TaskProgressColumn
 import toml
 import httpx
+import re
 
 REQUIRED_FILES = {
     ".cf/project.json": False,  # Optional, may not exist
@@ -541,4 +542,191 @@ def update_repo_files(project_root: str, repo_owner: str = "chipfoundry", repo_n
         # If we can't fetch the repo.json, return empty results
         results["error"] = str(e)
     
-    return results 
+    return results
+
+# GPIO Configuration Helpers
+
+GPIO_MODES = {
+    "invalid": "GPIO_MODE_INVALID",
+    "mgmt_input_nopull": "GPIO_MODE_MGMT_STD_INPUT_NOPULL",
+    "mgmt_input_pulldown": "GPIO_MODE_MGMT_STD_INPUT_PULLDOWN",
+    "mgmt_input_pullup": "GPIO_MODE_MGMT_STD_INPUT_PULLUP",
+    "mgmt_output": "GPIO_MODE_MGMT_STD_OUTPUT",
+    "mgmt_bidirectional": "GPIO_MODE_MGMT_STD_BIDIRECTIONAL",
+    "mgmt_analog": "GPIO_MODE_MGMT_STD_ANALOG",
+    "user_input_nopull": "GPIO_MODE_USER_STD_INPUT_NOPULL",
+    "user_input_pulldown": "GPIO_MODE_USER_STD_INPUT_PULLDOWN",
+    "user_input_pullup": "GPIO_MODE_USER_STD_INPUT_PULLUP",
+    "user_output": "GPIO_MODE_USER_STD_OUTPUT",
+    "user_bidirectional": "GPIO_MODE_USER_STD_BIDIRECTIONAL",
+    "user_output_monitored": "GPIO_MODE_USER_STD_OUT_MONITORED",
+    "user_analog": "GPIO_MODE_USER_STD_ANALOG",
+}
+
+# Mapping from mode names to hex values
+GPIO_MODE_TO_HEX = {
+    "GPIO_MODE_INVALID": "13'hXXXX",
+    "GPIO_MODE_MGMT_STD_INPUT_NOPULL": "13'h0403",
+    "GPIO_MODE_MGMT_STD_INPUT_PULLDOWN": "13'h0c01",
+    "GPIO_MODE_MGMT_STD_INPUT_PULLUP": "13'h0801",
+    "GPIO_MODE_MGMT_STD_OUTPUT": "13'h1809",
+    "GPIO_MODE_MGMT_STD_BIDIRECTIONAL": "13'h1801",
+    "GPIO_MODE_MGMT_STD_ANALOG": "13'h000b",
+    "GPIO_MODE_USER_STD_INPUT_NOPULL": "13'h0402",
+    "GPIO_MODE_USER_STD_INPUT_PULLDOWN": "13'h0c00",
+    "GPIO_MODE_USER_STD_INPUT_PULLUP": "13'h0800",
+    "GPIO_MODE_USER_STD_OUTPUT": "13'h1808",
+    "GPIO_MODE_USER_STD_BIDIRECTIONAL": "13'h1800",
+    "GPIO_MODE_USER_STD_OUT_MONITORED": "13'h1802",
+    "GPIO_MODE_USER_STD_ANALOG": "13'h000a",
+}
+
+# Reverse mapping from hex values to mode names
+GPIO_HEX_TO_MODE = {hex_val: mode_name for mode_name, hex_val in GPIO_MODE_TO_HEX.items()}
+
+GPIO_MODE_DESCRIPTIONS = {
+    "invalid": "Invalid (13'hXXXX) - Placeholder, must be changed",
+    "mgmt_input_nopull": "Management Input No Pull (13'h0403)",
+    "mgmt_input_pulldown": "Management Input Pull Down (13'h0c01)",
+    "mgmt_input_pullup": "Management Input Pull Up (13'h0801)",
+    "mgmt_output": "Management Output (13'h1809)",
+    "mgmt_bidirectional": "Management Bidirectional (13'h1801)",
+    "mgmt_analog": "Management Analog (13'h000b)",
+    "user_input_nopull": "User Input No Pull (13'h0402)",
+    "user_input_pulldown": "User Input Pull Down (13'h0c00)",
+    "user_input_pullup": "User Input Pull Up (13'h0800)",
+    "user_output": "User Output (13'h1808)",
+    "user_bidirectional": "User Bidirectional (13'h1800)",
+    "user_output_monitored": "User Output Monitored (13'h1802)",
+    "user_analog": "User Analog (13'h000a)",
+}
+
+def parse_user_defines_v(file_path: str) -> Dict[int, str]:
+    """
+    Parse user_defines.v file to extract GPIO configurations.
+    Returns a dict mapping GPIO number (5-37) to mode define name (e.g., "GPIO_MODE_USER_STD_OUTPUT").
+    """
+    gpio_configs = {}
+    if not Path(file_path).exists():
+        return gpio_configs
+    
+    with open(file_path, 'r') as f:
+        content = f.read()
+    
+    # Extract GPIO configurations using regex
+    # Pattern to match: `define USER_CONFIG_GPIO_<num>_INIT  `GPIO_MODE_<MODE> or hex value
+    pattern = r'`define\s+USER_CONFIG_GPIO_(\d+)_INIT\s+`?([A-Z0-9_]+|0x[0-9a-fA-F]+|13\'h[0-9a-fA-FX]+)'
+    
+    for match in re.finditer(pattern, content):
+        gpio_num = int(match.group(1))
+        mode_value = match.group(2)
+        # If it's a hex value or invalid, keep it as is
+        # Otherwise, it should be a mode name like GPIO_MODE_USER_STD_OUTPUT
+        if mode_value.startswith('0x') or mode_value.startswith("13'h") or mode_value == 'GPIO_MODE_INVALID':
+            # Keep hex values and invalid as is - they'll be handled in the UI
+            gpio_configs[gpio_num] = mode_value
+        else:
+            # It's a mode name, use it directly
+            gpio_configs[gpio_num] = mode_value
+    
+    return gpio_configs
+
+def update_user_defines_v(file_path: str, gpio_configs: Dict[int, str]):
+    """
+    Update user_defines.v file with new GPIO configurations.
+    gpio_configs maps GPIO number (5-37) to mode define name (e.g., "GPIO_MODE_USER_STD_OUTPUT").
+    """
+    if not Path(file_path).exists():
+        raise FileNotFoundError(f"user_defines.v not found at {file_path}")
+    
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+    
+    # Update each GPIO configuration line
+    # Pattern matches: `define USER_CONFIG_GPIO_<num>_INIT  `<mode>
+    pattern = r'(`define\s+USER_CONFIG_GPIO_)(\d+)(_INIT\s+)(.+)'
+    
+    new_lines = []
+    for line in lines:
+        match = re.match(pattern, line)
+        if match:
+            gpio_num = int(match.group(2))
+            if gpio_num in gpio_configs:
+                # Replace the mode value - preserve the backtick before the mode name
+                mode = gpio_configs[gpio_num]
+                # Preserve original spacing/formatting
+                indent = match.group(3)  # This includes the spacing after _INIT
+                new_line = f"{match.group(1)}{gpio_num}{indent}`{mode}\n"
+                new_lines.append(new_line)
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    
+    with open(file_path, 'w') as f:
+        f.writelines(new_lines)
+
+def get_gpio_config_from_project_json(project_json_path: str) -> Optional[Dict[int, str]]:
+    """
+    Load GPIO configuration from project.json.
+    Returns a dict mapping GPIO number to mode name (converts hex to mode name if needed).
+    """
+    if not Path(project_json_path).exists():
+        return None
+    
+    data = load_project_json(project_json_path)
+    gpio_config = data.get("project", {}).get("gpio_config")
+    if not gpio_config:
+        return None
+    
+    # Convert hex values to mode names if needed
+    converted_config = {}
+    for gpio_num_str, value in gpio_config.items():
+        gpio_num = int(gpio_num_str)
+        # If it's already a hex value, convert to mode name
+        if value in GPIO_HEX_TO_MODE:
+            converted_config[gpio_num] = GPIO_HEX_TO_MODE[value]
+        # If it's a mode name, keep it
+        elif value in GPIO_MODE_TO_HEX:
+            converted_config[gpio_num] = value
+        # If it's a hex value in different format, try to match
+        elif value.startswith("13'h") or value.startswith("0x"):
+            # Try to find matching hex value
+            for hex_val, mode_name in GPIO_HEX_TO_MODE.items():
+                if hex_val.replace("13'h", "").upper() == value.replace("13'h", "").replace("0x", "").upper():
+                    converted_config[gpio_num] = mode_name
+                    break
+            else:
+                # Keep as is if we can't convert
+                converted_config[gpio_num] = value
+        else:
+            # Keep as is
+            converted_config[gpio_num] = value
+    
+    return converted_config
+
+def save_gpio_config_to_project_json(project_json_path: str, gpio_configs: Dict[int, str]):
+    """
+    Save GPIO configuration to project.json.
+    Converts mode names to hex values before saving.
+    """
+    if Path(project_json_path).exists():
+        data = load_project_json(project_json_path)
+    else:
+        data = {"project": {}}
+    
+    if "project" not in data:
+        data["project"] = {}
+    
+    # Convert mode names to hex values
+    hex_config = {}
+    for gpio_num, mode_name in gpio_configs.items():
+        # Convert mode name to hex if we have a mapping
+        if mode_name in GPIO_MODE_TO_HEX:
+            hex_config[str(gpio_num)] = GPIO_MODE_TO_HEX[mode_name]
+        else:
+            # Keep as is if it's already a hex value or unknown
+            hex_config[str(gpio_num)] = mode_name
+    
+    data["project"]["gpio_config"] = hex_config
+    save_project_json(project_json_path, data)

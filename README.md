@@ -34,39 +34,45 @@ cf --help
    cd my_project
    ```
 
-2. **Set up the project** (replaces `make setup`):
+2. **Initialize your project** (required first step):
+   ```bash
+   cf init
+   ```
+   This creates `.cf/project.json` with project metadata. **Must be run before any other commands.**
+
+3. **Set up the project** (replaces `make setup`):
    ```bash
    cf setup
    ```
 
-3. **Generate SSH Key** (if you don't have one):
+4. **Generate SSH Key** (if you don't have one):
    ```bash
    cf keygen
    ```
 
-4. **Register your key** at [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
+5. **Register your key** at [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
 
-5. **Configure your credentials**:
+6. **Configure your credentials**:
    ```bash
    cf config
    ```
 
-6. **Upload your project**:
+7. **Upload your project**:
    ```bash
    cf push
    ```
 
-7. **Download results** (when available):
+8. **Download results** (when available):
    ```bash
    cf pull
    ```
 
-8. **View tapeout report**:
+9. **View tapeout report**:
    ```bash
    cf view-tapeout-report
    ```
 
-9. **Confirm final tapeout** (when ready to send GDS to foundry):
+10. **Confirm final tapeout** (when ready to send GDS to foundry):
    ```bash
    cf confirm
    ```
@@ -197,10 +203,23 @@ cf config
 cf init [--project-root DIRECTORY]
 ```
 
+> [!IMPORTANT]
+> This command **must be run first** after cloning a repository. It is required before running:
+> - `cf gpio-config`
+> - `cf harden`
+> - `cf precheck`
+> - `cf verify`
+> - `cf push`
+>
+> If you skip this step, other commands will show an error directing you to run `cf init` first.
+
+**What it does:**
 - **Smart defaults**: Auto-detects project name from directory and project type from GDS files
 - **Interactive prompts**: Shows detected values in prompts for easy acceptance
 - Creates `.cf/project.json` with project metadata
-- **Note**: GDS hash is generated during `push`, not `init`
+
+> [!NOTE]
+> GDS hash is generated during `push`, not `init`
 
 ### Setup a ChipFoundry Project
 
@@ -209,6 +228,9 @@ cf setup [OPTIONS]
 ```
 
 **Replaces `make setup`** - Comprehensive project setup with all dependencies.
+
+**Prerequisites:**
+- **Must run `cf init` first** - Project initialization is required
 
 **What it does:**
 1. Initializes project configuration (`.cf/project.json`)
@@ -249,6 +271,237 @@ cf setup --skip-openlane --skip-pdk
 **See also:**
 - Detailed documentation: [docs/cf-setup.md](docs/cf-setup.md)
 - Migration guide: [docs/MIGRATION.md](docs/MIGRATION.md)
+
+### Configure GPIO Settings
+
+```bash
+cf gpio-config [--project-root DIRECTORY]
+```
+
+**Replaces manual editing of `verilog/rtl/user_defines.v`** - Interactive GPIO configuration tool.
+
+**Prerequisites:**
+- **Must run `cf init` first** - Project initialization is required
+- GPIO configuration is required before `cf precheck` or `cf verify`
+
+**What it does:**
+1. Presents an interactive form for configuring GPIO pins 5-37 (GPIO 0-4 are fixed system pins)
+2. Shows available GPIO modes in a table with descriptions
+3. Allows selection by number, partial key, or full mode name
+4. Saves configuration to `.cf/project.json` (as hex values)
+5. Automatically updates `verilog/rtl/user_defines.v` with the new configuration
+6. Automatically runs `gen_gpio_defaults.py` to generate GPIO defaults for simulation (if Caravel is installed)
+
+**Prerequisites:**
+- **Must run `cf init` first** - Project initialization is required
+- Must be run before `cf precheck` or `cf verify`
+- GPIO configuration is required for verification and precheck to run
+
+**GPIO Modes Available:**
+- Management modes: `mgmt_input_nopull`, `mgmt_input_pulldown`, `mgmt_input_pullup`, `mgmt_output`, `mgmt_bidirectional`, `mgmt_analog`
+- User modes: `user_input_nopull`, `user_input_pulldown`, `user_input_pullup`, `user_output`, `user_bidirectional`, `user_output_monitored`, `user_analog`
+
+**Usage:**
+- Enter a number (1-13) to select a mode from the table
+- Enter a partial key (e.g., "user_out" matches "user_output")
+- Enter the full key name (e.g., "user_output")
+- Press Enter to keep current valid value (invalid values require input)
+
+**Examples:**
+```bash
+# Configure GPIO settings interactively
+cf gpio-config
+
+# Configure for a specific project directory
+cf gpio-config --project-root /path/to/project
+```
+
+**What gets updated:**
+- `.cf/project.json`: GPIO configuration stored as hex values (e.g., `"5": "13'h1808"`)
+- `verilog/rtl/user_defines.v`: GPIO mode definitions updated (e.g., `USER_CONFIG_GPIO_5_INIT`)
+
+> [!NOTE]
+> Invalid modes cannot be saved. All GPIOs must have valid configurations.
+
+### Harden a Macro
+
+```bash
+cf harden [MACRO] [OPTIONS]
+```
+
+**Replaces `make harden` and `make <macro_name>`** - Harden macros using LibreLane/OpenLane.
+
+**Prerequisites:**
+- **Must run `cf init` first** - Project initialization is required
+- OpenLane must be installed (via `cf setup`)
+
+**What it does:**
+1. Lists available macros in `openlane/` directory
+2. Runs the hardening flow (synthesis, placement, routing) for a specific macro
+3. Generates GDS, LEF, and other output files
+4. Supports both Nix and Docker execution environments
+
+**Key Options:**
+- `--list` or no argument: List all available macros
+- `MACRO`: Name of macro to harden (e.g., `user_proj_example`, `user_project_wrapper`)
+- `--project-root`: Specify project directory
+- `--tag`: Custom run tag (defaults to timestamp)
+- `--pdk`: PDK to use (default: sky130A)
+- `--use-nix`: Force use of Nix (fails if Nix not available)
+- `--use-docker`: Force use of Docker (fails if Docker not available)
+- `--dry-run`: Show configuration without running
+
+**Examples:**
+```bash
+# List all available macros
+cf harden --list
+
+# Harden a specific macro (replaces make user_proj_example)
+cf harden user_proj_example
+
+# Harden with custom tag and PDK
+cf harden user_proj_example --tag my_run --pdk sky130B
+
+# Preview hardening configuration
+cf harden user_proj_example --dry-run
+```
+
+**Workflow:**
+1. **Macro Hardening**: Harden individual macros first
+   ```bash
+   cf harden user_proj_example
+   ```
+
+2. **Integration**: Update `openlane/user_project_wrapper/config.json` to reference your macros
+
+3. **Wrapper Hardening**: Harden the top-level wrapper
+   ```bash
+   cf harden user_project_wrapper
+   ```
+
+**Output Files:**
+- `gds/<macro>.gds` - GDSII layout file
+- `lef/<macro>.lef` - LEF file for integration
+- `verilog/gl/<macro>.v` - Gate-level netlist
+- `spef/<macro>.spef` - Parasitic extraction file
+- `sdc/<macro>.sdc` - Timing constraints
+
+### Run Precheck Validation
+
+```bash
+cf precheck [OPTIONS]
+```
+
+**Replaces `make precheck`** - Run MPW precheck validation on your project.
+
+**Prerequisites:**
+- **Must run `cf init` first** - Project initialization is required
+- **Must run `cf gpio-config` first** - GPIO configuration is required
+- Precheck tools must be installed (via `cf setup`)
+- PDK must be installed (via `cf setup`)
+- Docker must be available
+
+**What it does:**
+1. Validates your design against MPW (Multi-Project Wafer) requirements
+2. Runs DRC, LVS, and other design rule checks
+3. Ensures your design will fit into the SoC reference design
+4. Generates reports highlighting any violations
+
+
+**Key Options:**
+- `--project-root`: Specify project directory
+- `--disable-lvs`: Skip LVS check, run specific checks only
+- `--checks`: Run specific checks (can be specified multiple times)
+  - Available: `license`, `makefile`, `default`, `documentation`, `consistency`, `gpio_defines`, `xor`, `magic_drc`, `klayout_feol`, `klayout_beol`, `klayout_offgrid`, `klayout_met_min_ca_density`, `klayout_pin_label_purposes_overlapping_drawing`, `klayout_zeroarea`
+- `--dry-run`: Show command without running
+
+**Examples:**
+```bash
+# Run all precheck validations (replaces make precheck)
+cf precheck
+
+# Run without LVS check
+cf precheck --disable-lvs
+
+# Run specific checks only
+cf precheck --checks license --checks makefile --checks gpio_defines
+
+# Preview precheck command
+cf precheck --dry-run
+```
+
+**What gets checked:**
+- License compliance
+- Makefile structure
+- GPIO configuration validity
+- Design consistency
+- DRC (Design Rule Check)
+- LVS (Layout vs Schematic)
+- And more...
+
+> [!NOTE]
+> Precheck is required before submitting your design for fabrication.
+
+### Run Verification Tests
+
+```bash
+cf verify [TEST] [OPTIONS]
+```
+
+**Replaces `make verify-<test>-rtl` and `make verify-<test>-gl`** - Run Cocotb verification tests.
+
+**Prerequisites:**
+- **Must run `cf init` first** - Project initialization is required
+- **Must run `cf gpio-config` first** - GPIO configuration is required
+- Cocotb environment must be set up (via `cf setup`)
+- Caravel must be installed (via `cf setup`)
+
+**What it does:**
+1. Runs functional verification tests using Cocotb
+2. Supports both RTL and gate-level (GL) simulations
+3. Can run individual tests or all tests
+4. Uses Docker container for consistent test environment
+
+
+**Key Options:**
+- `TEST`: Name of specific test to run (e.g., `counter_la`)
+- `--project-root`: Specify project directory
+- `--sim`: Simulation type - `rtl` (default) or `gl` (gate-level)
+- `--list`: List all available tests
+- `--all`: Run all tests
+- `--tag`: Run tests from a specific YAML test list (e.g., `user_proj_tests`)
+- `--dry-run`: Show configuration without running
+
+**Examples:**
+```bash
+# List all available tests
+cf verify --list
+
+# Run a specific test (RTL simulation, replaces make verify-counter_la-rtl)
+cf verify counter_la
+
+# Run gate-level simulation (replaces make verify-counter_la-gl)
+cf verify counter_la --sim gl
+
+# Run all tests
+cf verify --all
+
+# Run all RTL tests
+cf verify --all --sim rtl
+
+# Run tests from a specific test list
+cf verify --tag user_proj_tests
+
+# Preview verification command
+cf verify counter_la --dry-run
+```
+
+**Test Types:**
+- **RTL Simulation**: Tests your RTL design
+- **Gate-Level (GL) Simulation**: Tests the synthesized gate-level netlist
+
+> [!NOTE]
+> Verification tests ensure your design works correctly before hardening and submission.
 
 ### Push a Project (Upload)
 
@@ -311,7 +564,8 @@ cf confirm [OPTIONS]
   - `--sftp-username`: Override configured username
   - `--sftp-key`: Override configured key path
 
-**Important:** This command confirms that your current GDS file is ready to be sent to the foundry for tapeout. Only run this when you are completely satisfied with your design and ready for final tapeout processing. This action cannot be easily undone.
+> [!IMPORTANT]
+> This command confirms that your current GDS file is ready to be sent to the foundry for tapeout. Only run this when you are completely satisfied with your design and ready for final tapeout processing. This action cannot be easily undone.
 
 ### View Tapeout Report
 
@@ -430,7 +684,8 @@ The CLI tracks your project submission state through the `submission_state` fiel
    cf confirm       # Confirm current GDS file is ready for foundry tapeout
    ```
 
-**Important:** Only run `cf confirm` when you are completely satisfied with your GDS file and ready to send it to the foundry for tapeout processing. This action cannot be easily undone.
+> [!IMPORTANT]
+> Only run `cf confirm` when you are completely satisfied with your GDS file and ready to send it to the foundry for tapeout processing. This action cannot be easily undone.
 
 ---
 
