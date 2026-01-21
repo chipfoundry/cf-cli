@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "chipfoundry-cli"
-version = "1.2.8"
+version = "1.2.9"
 description = "CLI tool to automate ChipFoundry project submission to SFTP server"
 authors = ["ChipFoundry <marwan.abbas@chipfoundry.io>"]
 readme = "README.md"
@@ -16,6 +16,7 @@ rich = ">=13,<14"
 paramiko = ">=3.0.0,<4"
 toml = ">=0.10,<1.0"
 httpx = ">=0.24.0,<1.0"
+textual = ">=0.40.0,<1"
 
 [tool.poetry.dev-dependencies]
 wheel = "*"

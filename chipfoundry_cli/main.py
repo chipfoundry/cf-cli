@@ -23,6 +23,13 @@ import sys
 import shutil
 import signal
 
+# Textual imports for GPIO grid UI
+from textual.app import App, ComposeResult
+from textual.widgets import Button, Static, Footer, Header, Label
+from textual.containers import Grid, Horizontal, Vertical, Container, ScrollableContainer
+from textual.binding import Binding
+from textual.screen import ModalScreen
+
 DEFAULT_SSH_KEY = os.path.expanduser('~/.ssh/chipfoundry-key')
 DEFAULT_SFTP_HOST = 'sftp.chipfoundry.io'
 
@@ -398,7 +405,7 @@ def gpio_config(project_root):
     
     # For openframe, GPIO config is not needed
     if project_type == 'openframe':
-        console.print("[red]✗ GPIO configuration is not available for openframe projects.[/red]")
+        console.print("[red]GPIO configuration is not available for openframe projects.[/red]")
         console.print("[yellow]Openframe projects do not use user_defines.v.[/yellow]")
         raise click.Abort()
     
@@ -407,154 +414,738 @@ def gpio_config(project_root):
     # Load existing GPIO configs from project.json or user_defines.v
     existing_configs = get_gpio_config_from_project_json(str(project_json_path))
     if not existing_configs and user_defines_path.exists():
-        # Try to parse from user_defines.v
         existing_configs = parse_user_defines_v(str(user_defines_path))
     
     # Determine GPIO range based on project type
     if project_type == 'analog':  # caravan
-        # Caravan: GPIO 5-13 and 25-37 (GPIO 14-24 not available)
-        # User sees: 5-13, then 14-26 (which map to 25-37 internally)
         available_gpios = list(range(5, 14)) + list(range(25, 38))
         user_to_real_map = {}
         user_num = 5
         for real_gpio in available_gpios:
             user_to_real_map[user_num] = real_gpio
             user_num += 1
-        real_to_user_map = {v: k for k, v in user_to_real_map.items()}
-        console.print("\n[bold cyan]GPIO Configuration (Caravan)[/bold cyan]")
-        console.print("Configure GPIO pins 5-13, then 14-26 (GPIO 0-4 are fixed system pins)\n")
-        console.print("[dim]Note: GPIO 14-24 are not available in Caravan. Numbers 14-26 map to GPIO 25-37.[/dim]\n")
+        gpio_label = "Caravan"
+        gpio_note = "Note: GPIO 14-24 unavailable. Numbers 14-26 map to GPIO 25-37."
+        user_gpio_range = list(range(5, 27))
     else:  # digital (caravel)
-        # Caravel: GPIO 5-37 all available
         available_gpios = list(range(5, 38))
         user_to_real_map = {gpio: gpio for gpio in available_gpios}
-        real_to_user_map = {gpio: gpio for gpio in available_gpios}
-        console.print("\n[bold cyan]GPIO Configuration (Caravel)[/bold cyan]")
-        console.print("Configure GPIO pins 5-37 (GPIO 0-4 are fixed system pins)\n")
+        gpio_label = "Caravel"
+        gpio_note = None
+        user_gpio_range = list(range(5, 38))
     
-    # Create a list of GPIO mode options for selection, excluding "invalid"
-    mode_options = [key for key in GPIO_MODES.keys() if key != "invalid"]
+    total_pins = len(user_to_real_map)
     
-    # Show modes in a more compact table format
-    table = Table(title="Available GPIO Modes", show_header=True, header_style="bold cyan")
-    table.add_column("#", style="dim", width=4)
-    table.add_column("Key", style="cyan", width=20)
-    table.add_column("Description", style="white")
+    # Mode shortcuts - short names that map to full mode keys
+    MODE_SHORTCUTS = {
+        "out": "user_output", "output": "user_output", "o": "user_output",
+        "in": "user_input_nopull", "input": "user_input_nopull", "i": "user_input_nopull",
+        "in-pd": "user_input_pulldown", "input-pd": "user_input_pulldown", "pulldown": "user_input_pulldown",
+        "in-pu": "user_input_pullup", "input-pu": "user_input_pullup", "pullup": "user_input_pullup",
+        "bidir": "user_bidirectional", "bidirectional": "user_bidirectional", "b": "user_bidirectional",
+        "analog": "user_analog", "ana": "user_analog", "a": "user_analog",
+        "out-mon": "user_output_monitored", "monitored": "user_output_monitored",
+        # Management modes
+        "mgmt-out": "mgmt_output", "mgmt-in": "mgmt_input_nopull", 
+        "mgmt-bidir": "mgmt_bidirectional", "mgmt-analog": "mgmt_analog",
+    }
     
-    for i, key in enumerate(mode_options, 1):
-        table.add_row(str(i), key, GPIO_MODE_DESCRIPTIONS[key])
+    def resolve_mode(mode_str):
+        """Resolve a mode string (shortcut or full name) to the mode key."""
+        mode_str = mode_str.lower().strip()
+        if mode_str in MODE_SHORTCUTS:
+            return MODE_SHORTCUTS[mode_str]
+        # Check if it's already a valid mode key
+        mode_options = [key for key in GPIO_MODES.keys() if key != "invalid"]
+        if mode_str in mode_options:
+            return mode_str
+        # Partial match
+        matches = [m for m in mode_options if m.startswith(mode_str)]
+        if len(matches) == 1:
+            return matches[0]
+        return None
     
-    console.print(table)
-    console.print("[dim]Tip: Enter number or full key. [/dim]\n")
+    def parse_gpio_range(input_str, valid_gpios):
+        """Parse '5-10', '5,7,9', or '5-10,15' into list of GPIO numbers."""
+        selected = set()
+        parts = input_str.replace(' ', '').split(',')
+        for part in parts:
+            if '-' in part:
+                try:
+                    start, end = part.split('-', 1)
+                    for g in range(int(start), int(end) + 1):
+                        if g in valid_gpios:
+                            selected.add(g)
+                except ValueError:
+                    pass
+            else:
+                try:
+                    g = int(part)
+                    if g in valid_gpios:
+                        selected.add(g)
+                except ValueError:
+                    pass
+        return sorted(selected)
     
-    gpio_configs = {}
+    def format_gpio_ranges(gpio_list):
+        """Convert [5,6,7,10,11,15] to '5-7, 10-11, 15'."""
+        if not gpio_list:
+            return "-"
+        gpio_list = sorted(gpio_list)
+        ranges = []
+        start = gpio_list[0]
+        end = start
+        for g in gpio_list[1:]:
+            if g == end + 1:
+                end = g
+            else:
+                ranges.append(f"{start}-{end}" if start != end else str(start))
+                start = end = g
+        ranges.append(f"{start}-{end}" if start != end else str(start))
+        return ", ".join(ranges)
     
-    # Helper function to find mode key from mode name or hex value
     def find_mode_key(mode_value):
         """Find the mode key for a given mode value."""
         if not mode_value:
             return None
-        # Direct match
         for key, mode_name in GPIO_MODES.items():
-            if mode_name == mode_value:
-                # Don't return "invalid" if it's not in our selectable options
-                if key != "invalid":
-                    return key
-        # Check if it's a hex value or invalid - return None to indicate invalid
-        if mode_value.startswith('0x') or mode_value.startswith("13'h") or 'INVALID' in mode_value:
-            return None  # Don't show "invalid", just show no default
+            if mode_name == mode_value and key != "invalid":
+                return key
         return None
     
-    # Helper function to check if a mode is invalid
-    def is_invalid_mode(mode_value):
-        """Check if a mode value is invalid."""
-        if not mode_value:
-            return True
-        if mode_value == GPIO_MODES.get("invalid"):
-            return True
-        if mode_value.startswith('0x') or mode_value.startswith("13'h") or 'INVALID' in mode_value:
-            return True
-        return False
+    def display_summary(gpio_configs, user_to_real_map):
+        """Display a summary of GPIO configuration grouped by mode."""
+        mode_groups = {}
+        for user_gpio, real_gpio in user_to_real_map.items():
+            mode_value = gpio_configs.get(real_gpio)
+            mode_key = find_mode_key(mode_value) if mode_value else None
+            if mode_key not in mode_groups:
+                mode_groups[mode_key] = []
+            mode_groups[mode_key].append(user_gpio)
+        
+        console.print()
+        table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+        table.add_column("Mode", style="cyan", width=24)
+        table.add_column("Count", justify="right", width=6)
+        table.add_column("GPIOs", style="white")
+        
+        # Sort by count (most common first)
+        for mode_key in sorted(mode_groups.keys(), key=lambda k: -len(mode_groups[k])):
+            gpios = mode_groups[mode_key]
+            display_name = mode_key if mode_key else "[red]unconfigured[/red]"
+            style = ""
+            if mode_key:
+                if "output" in mode_key: style = "[green]"
+                elif "input" in mode_key: style = "[cyan]"
+                elif "bidirectional" in mode_key: style = "[yellow]"
+                elif "analog" in mode_key: style = "[magenta]"
+                display_name = f"{style}{mode_key}[/]"
+            table.add_row(display_name, str(len(gpios)), format_gpio_ranges(gpios))
+        
+        console.print(table)
     
-    # Helper function to find matching mode by partial input
-    def find_matching_mode(user_input):
-        """Find mode that matches user input (partial match or full key)."""
-        user_input_lower = user_input.lower()
-        
-        # Check for exact key match
-        if user_input in mode_options:
-            return user_input
-        
-        # Check for partial matches (case-insensitive)
-        matches = [key for key in mode_options if key.lower().startswith(user_input_lower)]
-        if len(matches) == 1:
-            return matches[0]
-        elif len(matches) > 1:
-            # Multiple matches - return list so we can show them
-            return matches
-        
-        return None
+    # Initialize gpio_configs
+    gpio_configs = existing_configs.copy() if existing_configs else {}
     
-    # Configure each available GPIO
-    for user_gpio_num in sorted(user_to_real_map.keys()):
-        real_gpio_num = user_to_real_map[user_gpio_num]
+    # ========================
+    # HEADER
+    # ========================
+    
+    
+    def get_mode_display(mode_key):
+        """Get display name for a mode."""
+        names = {
+            "user_output": "user output",
+            "user_output_monitored": "user output monitored",
+            "user_input_nopull": "user input",
+            "user_input_pulldown": "user input pulldown",
+            "user_input_pullup": "user input pullup",
+            "user_bidirectional": "user bidirectional",
+            "user_analog": "user analog",
+            "mgmt_output": "mgmt output",
+            "mgmt_input_nopull": "mgmt input",
+            "mgmt_input_pulldown": "mgmt input pulldown",
+            "mgmt_input_pullup": "mgmt input pullup",
+            "mgmt_bidirectional": "mgmt bidirectional",
+            "mgmt_analog": "mgmt analog",
+        }
+        return names.get(mode_key, "not set")
+    
+    def get_mode_color(mode_key):
+        """Get color for a mode."""
+        if not mode_key:
+            return "red"
+        elif "output" in mode_key:
+            return "green"
+        elif "input" in mode_key:
+            return "cyan"
+        elif "bidirectional" in mode_key:
+            return "yellow"
+        elif "analog" in mode_key:
+            return "magenta"
+        return "white"
+    
+    # ========================
+    # STEP 2: Textual Grid UI for GPIO Configuration
+    # ========================
+    
+    # All available modes for the selector
+    ALL_MODES = [
+        ("user_output", "User Output"),
+        ("user_output_monitored", "User Output Monitored"),
+        ("user_input_nopull", "User Input (no pull)"),
+        ("user_input_pullup", "User Input (pull-up)"),
+        ("user_input_pulldown", "User Input (pull-down)"),
+        ("user_bidirectional", "User Bidirectional"),
+        ("user_analog", "User Analog"),
+        ("mgmt_output", "Mgmt Output"),
+        ("mgmt_input_nopull", "Mgmt Input (no pull)"),
+        ("mgmt_input_pullup", "Mgmt Input (pull-up)"),
+        ("mgmt_input_pulldown", "Mgmt Input (pull-down)"),
+        ("mgmt_bidirectional", "Mgmt Bidirectional"),
+        ("mgmt_analog", "Mgmt Analog"),
+    ]
+    
+    class NoKeyScrollContainer(ScrollableContainer):
+        """ScrollableContainer that doesn't capture arrow keys."""
+        can_focus = False
+        BINDINGS = []
+    
+    class GPIOButton(Static):
+        """A widget representing a single GPIO pin."""
         
-        # Get current value if exists (using real GPIO number)
-        current_mode = existing_configs.get(real_gpio_num) if existing_configs else None
-        detected_key = find_mode_key(current_mode) if current_mode else None
-        is_invalid = is_invalid_mode(current_mode)
+        can_focus = True
         
-        # Show GPIO number with mapping info for caravan
-        gpio_display = f"GPIO {user_gpio_num}"
-        if project_type == 'analog' and user_gpio_num >= 14:
-            # Show the real GPIO number for caravan
-            gpio_display = f"GPIO {user_gpio_num} (GPIO {real_gpio_num})"
+        def __init__(self, gpio_num: int, mode_key: str = None, **kwargs):
+            self.gpio_num = gpio_num
+            self.mode_key = mode_key
+            self.is_selected = False
+            # Create initial label - use two lines
+            abbrev = get_mode_display(mode_key) if mode_key else "not set"
+            super().__init__(f"[b]{gpio_num}[/b]\n{abbrev}", **kwargs)
+            self.id = f"gpio_{gpio_num}"
         
-        # Build prompt with detected default (only show if valid)
-        if detected_key and not is_invalid:
-            prompt_text = f"{gpio_display} ([cyan]{detected_key}[/cyan]): "
-        else:
-            prompt_text = f"{gpio_display}: "
+        def _update_display(self):
+            """Update the display text."""
+            abbrev = get_mode_display(self.mode_key) if self.mode_key else "not set"
+            self.update(f"[b]{self.gpio_num}[/b]\n{abbrev}")
         
-        while True:
-            user_input = console.input(prompt_text).strip()
-            
-            if not user_input:
-                # If current mode is invalid, require input
-                if is_invalid_mode(current_mode):
-                    console.print(f"[red]{gpio_display} is currently invalid. Please enter a valid mode (1-{len(mode_options)} or mode key).[/red]")
-                    continue
-                # Use current value if user just presses enter and we have a valid one
-                if current_mode:
-                    gpio_configs[real_gpio_num] = current_mode
-                    break
-                else:
-                    # No current value and no input - require input
-                    console.print(f"[red]{gpio_display} has no configuration. Please enter a valid mode (1-{len(mode_options)} or mode key).[/red]")
-                    continue
-            elif user_input.isdigit():
-                # User selected by number
-                choice_num = int(user_input)
-                if 1 <= choice_num <= len(mode_options):
-                    selected_key = mode_options[choice_num - 1]
-                    gpio_configs[real_gpio_num] = GPIO_MODES[selected_key]
-                    break
-                else:
-                    console.print(f"[red]Invalid choice. Please enter 1-{len(mode_options)}.[/red]")
+        def _update_style(self):
+            """Update widget style based on mode and selection."""
+            color = get_mode_color(self.mode_key)
+            if self.is_selected:
+                self.add_class("selected")
             else:
-                # Try to find matching mode
-                match_result = find_matching_mode(user_input)
+                self.remove_class("selected")
+                self.styles.color = color
+                self.styles.border = ("solid", color)
+        
+        def on_mount(self):
+            """Set initial style on mount."""
+            self._update_style()
+        
+        def set_mode(self, mode_key: str):
+            """Update the GPIO mode."""
+            self.mode_key = mode_key
+            self._update_display()
+            self._update_style()
+        
+        def toggle_selected(self):
+            """Toggle selection state."""
+            self.is_selected = not self.is_selected
+            self._update_style()
+        
+        def deselect(self):
+            """Clear selection."""
+            self.is_selected = False
+            self._update_style()
+        
+        def on_click(self):
+            """Handle click - toggle selection."""
+            self.toggle_selected()
+            # Update current index to this button
+            try:
+                self.app.current_index = self.app.gpio_list.index(self.gpio_num)
+                self.app._highlight_current()
+            except (ValueError, AttributeError):
+                pass
+            self.app._update_status()
+    
+    class ModeSelectScreen(ModalScreen):
+        """Modal screen for selecting GPIO mode."""
+        
+        BINDINGS = [
+            Binding("escape", "cancel", "Cancel"),
+            Binding("up", "move_up", "Up", show=False, priority=True),
+            Binding("down", "move_down", "Down", show=False, priority=True),
+            Binding("enter", "select_current", "Select", show=False, priority=True),
+        ]
+        
+        CSS = """
+        ModeSelectScreen {
+            align: center middle;
+        }
+        
+        #mode-dialog {
+            width: 60;
+            height: auto;
+            max-height: 90%;
+            padding: 1 2;
+            background: $surface;
+            border: solid cyan;
+            overflow-y: auto;
+        }
+        
+        #mode-title {
+            text-align: center;
+            text-style: bold;
+            margin-bottom: 1;
+            color: cyan;
+        }
+        
+        .section-label {
+            text-style: bold;
+            margin-top: 1;
+            color: white;
+        }
+        
+        .mode-btn {
+            width: 100%;
+            margin: 0;
+        }
+        
+        .mode-btn.current-mode {
+            border: double white;
+        }
+        
+        .mode-btn-output {
+            color: green;
+        }
+        
+        .mode-btn-input {
+            color: cyan;
+        }
+        
+        .mode-btn-bidir {
+            color: yellow;
+        }
+        
+        .mode-btn-analog {
+            color: magenta;
+        }
+        
+        #cancel-row {
+            margin-top: 1;
+            align: center middle;
+        }
+        """
+        
+        def __init__(self, gpio_nums: list, **kwargs):
+            super().__init__(**kwargs)
+            self.gpio_nums = gpio_nums
+            self.current_idx = 0
+            self.mode_buttons = []
+        
+        def compose(self) -> ComposeResult:
+            gpio_str = ", ".join(str(g) for g in self.gpio_nums[:5])
+            if len(self.gpio_nums) > 5:
+                gpio_str += f"... ({len(self.gpio_nums)} total)"
+            
+            with Vertical(id="mode-dialog"):
+                yield Label(f"Select mode for GPIO: {gpio_str}", id="mode-title")
+                yield Label("[dim]Use ↑↓ arrows and Enter, or click[/dim]")
                 
-                if match_result is None:
-                    console.print(f"[red]No match found for '{user_input}'. Try a number (1-{len(mode_options)}), partial key, or full key.[/red]")
-                elif isinstance(match_result, list):
-                    # Multiple matches found
-                    console.print(f"[yellow]Multiple matches found: {', '.join(match_result)}[/yellow]")
-                    console.print(f"[dim]Please be more specific or use a number (1-{len(mode_options)}).[/dim]")
+                # User modes section
+                yield Label("── User Modes ──", classes="section-label")
+                for mode_key, mode_name in ALL_MODES:
+                    if mode_key.startswith("user_"):
+                        if "output" in mode_key:
+                            btn_class = "mode-btn mode-btn-output"
+                        elif "input" in mode_key:
+                            btn_class = "mode-btn mode-btn-input"
+                        elif "bidirectional" in mode_key:
+                            btn_class = "mode-btn mode-btn-bidir"
+                        elif "analog" in mode_key:
+                            btn_class = "mode-btn mode-btn-analog"
+                        else:
+                            btn_class = "mode-btn"
+                        yield Button(mode_name, id=f"mode_{mode_key}", classes=btn_class)
+                
+                # Management modes section
+                yield Label("── Management Modes ──", classes="section-label")
+                for mode_key, mode_name in ALL_MODES:
+                    if mode_key.startswith("mgmt_"):
+                        if "output" in mode_key:
+                            btn_class = "mode-btn mode-btn-output"
+                        elif "input" in mode_key:
+                            btn_class = "mode-btn mode-btn-input"
+                        elif "bidirectional" in mode_key:
+                            btn_class = "mode-btn mode-btn-bidir"
+                        elif "analog" in mode_key:
+                            btn_class = "mode-btn mode-btn-analog"
+                        else:
+                            btn_class = "mode-btn"
+                        yield Button(mode_name, id=f"mode_{mode_key}", classes=btn_class)
+                
+                with Horizontal(id="cancel-row"):
+                    yield Button("Cancel", variant="error", id="cancel-btn")
+        
+        def on_mount(self) -> None:
+            """Initialize on mount."""
+            # Collect all mode buttons
+            self.mode_buttons = list(self.query(".mode-btn"))
+            if self.mode_buttons:
+                self._highlight_current()
+        
+        def _highlight_current(self) -> None:
+            """Highlight current button."""
+            for i, btn in enumerate(self.mode_buttons):
+                if i == self.current_idx:
+                    btn.add_class("current-mode")
+                    btn.focus()
                 else:
-                    # Single match found
-                    gpio_configs[real_gpio_num] = GPIO_MODES[match_result]
-                    break
+                    btn.remove_class("current-mode")
+        
+        def action_move_up(self) -> None:
+            """Move selection up."""
+            if self.current_idx > 0:
+                self.current_idx -= 1
+                self._highlight_current()
+        
+        def action_move_down(self) -> None:
+            """Move selection down."""
+            if self.current_idx < len(self.mode_buttons) - 1:
+                self.current_idx += 1
+                self._highlight_current()
+        
+        def action_select_current(self) -> None:
+            """Select the current mode."""
+            if 0 <= self.current_idx < len(self.mode_buttons):
+                btn = self.mode_buttons[self.current_idx]
+                mode_key = btn.id[5:]  # Remove "mode_" prefix
+                self.dismiss(mode_key)
+        
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "cancel-btn":
+                self.dismiss(None)
+            elif event.button.id.startswith("mode_"):
+                mode_key = event.button.id[5:]  # Remove "mode_" prefix
+                self.dismiss(mode_key)
+        
+        def action_cancel(self):
+            self.dismiss(None)
+    
+    class GPIOGridApp(App):
+        """Textual app for GPIO grid configuration."""
+        
+        GRID_COLS = 4  # Number of columns in the grid
+        
+        CSS = """
+        Screen {
+            align: center middle;
+        }
+        
+        #main-container {
+            width: 100%;
+            height: 100%;
+            padding: 1;
+        }
+        
+        #title {
+            text-align: center;
+            text-style: bold;
+            color: cyan;
+            margin-bottom: 1;
+        }
+        
+        #grid-scroll {
+            height: 1fr;
+            width: 100%;
+        }
+        
+        #gpio-grid {
+            grid-size: 4;
+            grid-gutter: 1;
+            padding: 1;
+            height: auto;
+            width: 100%;
+        }
+        
+        GPIOButton {
+            width: 1fr;
+            min-width: 24;
+            height: 4;
+            text-align: center;
+            border: solid green;
+            content-align: center middle;
+            padding: 0 1;
+        }
+        
+        GPIOButton.current {
+            border: double cyan;
+            background: $primary;
+        }
+        
+        GPIOButton.selected {
+            background: $success;
+            color: black;
+        }
+        
+        #legend {
+            text-align: center;
+            color: grey;
+            margin-top: 1;
+        }
+        
+        #status {
+            text-align: center;
+            margin-top: 1;
+            color: yellow;
+        }
+        
+        #mode-dialog {
+            width: 70%;
+            max-width: 80;
+            height: auto;
+            padding: 2;
+            background: $surface;
+            border: solid cyan;
+        }
+        
+        #mode-title {
+            text-align: center;
+            text-style: bold;
+            margin-bottom: 1;
+        }
+        
+        #mode-select {
+            width: 100%;
+            margin-bottom: 1;
+        }
+        
+        #mode-buttons {
+            align: center middle;
+            margin-top: 1;
+        }
+        
+        #mode-buttons Button {
+            margin: 0 1;
+        }
+        """
+        
+        BINDINGS = [
+            Binding("up", "nav_up", "Up", show=False, priority=True),
+            Binding("down", "nav_down", "Down", show=False, priority=True),
+            Binding("left", "nav_left", "Left", show=False, priority=True),
+            Binding("right", "nav_right", "Right", show=False, priority=True),
+            Binding("space", "toggle", "Select", priority=True),
+            Binding("enter", "open_mode", "Set Mode", priority=True),
+            Binding("a", "select_all", "Select All"),
+            Binding("n", "select_none", "Clear"),
+            Binding("d", "done", "Save & Exit"),
+            Binding("q", "quit", "Quit"),
+        ]
+        
+        def __init__(self, gpio_configs, user_to_real_map, user_gpio_range, gpio_label="", **kwargs):
+            super().__init__(**kwargs)
+            self.gpio_configs = gpio_configs
+            self.user_to_real_map = user_to_real_map
+            self.user_gpio_range = user_gpio_range
+            self.gpio_label = gpio_label
+            self.gpio_buttons = {}
+            self.gpio_list = sorted(user_to_real_map.keys())
+            self.current_index = 0
+        
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=False)
+            
+            with Vertical(id="main-container"):
+                yield Label(f"GPIO Configuration ({self.gpio_label}) - Arrows: navigate, Space: select, Enter: set mode, D: done", id="title")
+                
+                with NoKeyScrollContainer(id="grid-scroll"):
+                    with Grid(id="gpio-grid"):
+                        for gpio_num in self.gpio_list:
+                            real_gpio = self.user_to_real_map[gpio_num]
+                            mode_value = self.gpio_configs.get(real_gpio)
+                            mode_key = find_mode_key(mode_value) if mode_value else None
+                            btn = GPIOButton(gpio_num, mode_key)
+                            self.gpio_buttons[gpio_num] = btn
+                            yield btn
+                
+                yield Label("[Space] toggle  [Enter] set mode  [A] select all  [N] select none  [D] done", id="legend")
+                yield Label("", id="status")
+            
+            yield Footer()
+        
+        def on_mount(self) -> None:
+            """Initialize on mount."""
+            if self.gpio_list:
+                self.current_index = 0
+                self._highlight_current()
+                self._update_status()
+        
+        def _highlight_current(self) -> None:
+            """Highlight the GPIO at current_index and scroll into view."""
+            # Remove highlight from all
+            for btn in self.gpio_buttons.values():
+                btn.remove_class("current")
+            # Add highlight to current and scroll into view
+            if 0 <= self.current_index < len(self.gpio_list):
+                gpio_num = self.gpio_list[self.current_index]
+                btn = self.gpio_buttons[gpio_num]
+                btn.add_class("current")
+                btn.scroll_visible()
+        
+        def _is_modal_active(self) -> bool:
+            """Check if a modal screen is currently active."""
+            return len(self.screen_stack) > 1
+        
+        def action_nav_up(self) -> None:
+            """Move up one row."""
+            if self._is_modal_active():
+                self.screen.action_move_up()
+                return
+            new_idx = self.current_index - self.GRID_COLS
+            if new_idx >= 0:
+                self.current_index = new_idx
+                self._highlight_current()
+        
+        def action_nav_down(self) -> None:
+            """Move down one row."""
+            if self._is_modal_active():
+                self.screen.action_move_down()
+                return
+            new_idx = self.current_index + self.GRID_COLS
+            if new_idx < len(self.gpio_list):
+                self.current_index = new_idx
+                self._highlight_current()
+        
+        def action_nav_left(self) -> None:
+            """Move left one column."""
+            if self._is_modal_active():
+                return  # No left/right in modal
+            if self.current_index > 0:
+                self.current_index -= 1
+                self._highlight_current()
+        
+        def action_nav_right(self) -> None:
+            """Move right one column."""
+            if self._is_modal_active():
+                return  # No left/right in modal
+            if self.current_index < len(self.gpio_list) - 1:
+                self.current_index += 1
+                self._highlight_current()
+        
+        def action_toggle(self) -> None:
+            """Toggle selection of current GPIO."""
+            if self._is_modal_active():
+                return
+            if 0 <= self.current_index < len(self.gpio_list):
+                gpio_num = self.gpio_list[self.current_index]
+                self.gpio_buttons[gpio_num].toggle_selected()
+                self._update_status()
+        
+        def action_open_mode(self) -> None:
+            """Open mode selector or confirm selection in modal."""
+            if self._is_modal_active():
+                self.screen.action_select_current()
+                return
+            self.action_set_mode()
+        
+        def _get_selected_gpios(self) -> list:
+            """Get list of selected GPIO numbers."""
+            return [num for num, btn in self.gpio_buttons.items() if btn.is_selected]
+        
+        def _update_status(self):
+            """Update the status label."""
+            selected = self._get_selected_gpios()
+            status = self.query_one("#status", Label)
+            if selected:
+                status.update(f"Selected: {', '.join(str(g) for g in sorted(selected))} ({len(selected)} pins)")
+            else:
+                status.update("No pins selected - Space to select, Enter to set mode for focused pin")
+        
+        def action_toggle_select(self) -> None:
+            """Toggle selection of focused GPIO."""
+            focused = self.focused
+            if isinstance(focused, GPIOButton):
+                focused.toggle_selected()
+                self._update_status()
+        
+        def action_select_all(self) -> None:
+            """Select all GPIOs."""
+            for btn in self.gpio_buttons.values():
+                btn.is_selected = True
+                btn._update_style()
+            self._update_status()
+        
+        def action_select_none(self) -> None:
+            """Clear all selections."""
+            for btn in self.gpio_buttons.values():
+                btn.deselect()
+            self._update_status()
+        
+        def action_set_mode(self) -> None:
+            """Open mode selection for selected GPIOs."""
+            selected = self._get_selected_gpios()
+            if not selected:
+                # If nothing selected, use the focused one
+                focused = self.focused
+                if isinstance(focused, GPIOButton):
+                    selected = [focused.gpio_num]
+            
+            if selected:
+                self.push_screen(ModeSelectScreen(selected), self._apply_mode)
+        
+        def _apply_mode(self, mode_key: str) -> None:
+            """Apply the selected mode to selected GPIOs."""
+            if mode_key:
+                selected = self._get_selected_gpios()
+                if not selected:
+                    focused = self.focused
+                    if isinstance(focused, GPIOButton):
+                        selected = [focused.gpio_num]
+                
+                for gpio_num in selected:
+                    real_gpio = self.user_to_real_map[gpio_num]
+                    self.gpio_configs[real_gpio] = GPIO_MODES[mode_key]
+                    self.gpio_buttons[gpio_num].set_mode(mode_key)
+                
+                # Clear selection after applying
+                for btn in self.gpio_buttons.values():
+                    btn.deselect()
+                self._update_status()
+        
+        def action_done(self) -> None:
+            """Save and exit."""
+            self.exit(result=self.gpio_configs)
+        
+        def action_quit(self) -> None:
+            """Quit without explicit save (but configs are already updated)."""
+            self.exit(result=self.gpio_configs)
+    
+    # Run the Textual grid app
+    
+    app = GPIOGridApp(gpio_configs, user_to_real_map, user_gpio_range, gpio_label)
+    gpio_configs = app.run()
+    
+    # ========================
+    # SUMMARY & SAVE
+    # ========================
+    console.print("\n[bold]Final Configuration:[/bold]")
+    display_summary(gpio_configs, user_to_real_map)
+    
+    # Check for unconfigured
+    unconfigured = [g for g in user_to_real_map.keys() 
+                   if not gpio_configs.get(user_to_real_map[g]) or 
+                   find_mode_key(gpio_configs.get(user_to_real_map[g])) is None]
+    
+    if unconfigured:
+        console.print(f"\n[yellow]Warning: {len(unconfigured)} pins still unconfigured: {format_gpio_ranges(unconfigured)}[/yellow]")
+        confirm = console.input("Save anyway? (y/n): ").strip().lower()
+        if confirm not in ('y', 'yes'):
+            console.print("[yellow]Aborted.[/yellow]")
+            raise click.Abort()
     
     # Save to project.json
     save_gpio_config_to_project_json(str(project_json_path), gpio_configs)

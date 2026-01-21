@@ -108,13 +108,19 @@ class TestGpioConfigCommand:
         (verilog_dir / 'user_defines.v').write_text(user_defines_content)
         
         runner = CliRunner()
-        # Simulate user input: enter "1" for each GPIO (user_output mode)
-        # We'll use input_stream to provide inputs
-        inputs = '\n'.join(['1'] * 33)  # GPIO 5-37 = 33 GPIOs
-        result = runner.invoke(main, [
-            'gpio-config',
-            '--project-root', temp_project_dir
-        ], input=inputs)
+        # Note: With textual, we need to mock the interactive app
+        from unittest.mock import patch, MagicMock
+        
+        # Mock the Textual GPIOGridApp to return gpio configs immediately
+        with patch('chipfoundry_cli.main.GPIOGridApp') as mock_app_class:
+            mock_app = MagicMock()
+            mock_app.run.return_value = {i: 'GPIO_MODE_USER_STD_OUTPUT' for i in range(5, 38)}
+            mock_app_class.return_value = mock_app
+            
+            result = runner.invoke(main, [
+                'gpio-config',
+                '--project-root', temp_project_dir
+            ])
         
         # Should create project.json
         assert project_json_path.exists()
