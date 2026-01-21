@@ -18,7 +18,7 @@ toml = ">=0.10,<1.0"
 httpx = ">=0.24.0,<1.0"
 textual = ">=0.40.0,<1"
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 wheel = "*"
 black = ">=24.4.0,<25"
 flake8 = ">=4"
