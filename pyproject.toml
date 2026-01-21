@@ -10,7 +10,7 @@ repository = "https://github.com/chipfoundry/cf-cli"
 packages = [{ include = "chipfoundry_cli" }]
 
 [tool.poetry.dependencies]
-python = ">=3.8.0"
+python = ">=3.8.1"
 click = ">=8.0.0,<9"
 rich = ">=13,<14"
 paramiko = ">=3.0.0,<4"
