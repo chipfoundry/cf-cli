@@ -350,7 +350,8 @@ def init(project_root):
 
 @main.command('gpio-config')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
-def gpio_config(project_root):
+@click.option('--view', is_flag=True, help='Display current GPIO configuration summary without editing.')
+def gpio_config(project_root, view):
     """Configure GPIO settings interactively and save to project config and user_defines.v."""
     if not project_root:
         project_root = os.getcwd()
@@ -547,6 +548,17 @@ def gpio_config(project_root):
     # Initialize gpio_configs
     gpio_configs = existing_configs.copy() if existing_configs else {}
     
+    # If --view flag is set, just display the summary and return
+    if view:
+        if not gpio_configs:
+            console.print("[yellow]No GPIO configuration found.[/yellow]")
+            console.print("[dim]Run 'cf gpio-config' to configure GPIOs.[/dim]")
+            return
+        console.print(f"\n[bold cyan]GPIO Configuration ({gpio_label})[/bold cyan]")
+        display_summary(gpio_configs, user_to_real_map)
+        console.print()
+        return
+    
     # ========================
     # HEADER
     # ========================
@@ -576,7 +588,7 @@ def gpio_config(project_root):
         if not mode_key:
             return "red"
         elif "output" in mode_key:
-            return "ansi_bright_blue"
+            return "ansi_bright_green"
         elif "input" in mode_key:
             return "cyan"
         elif "bidirectional" in mode_key:
@@ -1196,118 +1208,6 @@ def gpio_config(project_root):
             #     console.print("[dim]Run 'cf setup' to install Caravel, or run the script manually after setup.[/dim]")
         except Exception as e:
             console.print(f"[red]Error updating user_defines.v: {e}[/red]")
-
-
-@main.command('gpio-status')
-@click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
-def gpio_status(project_root):
-    """Display current GPIO configuration summary."""
-    if not project_root:
-        project_root = os.getcwd()
-    
-    project_root = Path(project_root)
-    
-    # Load project config
-    project_json_path = project_root / '.cf' / 'project.json'
-    if not project_json_path.exists():
-        console.print("[red]Error: No project configuration found.[/red]")
-        console.print("[dim]Run 'cf gpio-config' first to configure GPIOs.[/dim]")
-        return
-    
-    with open(project_json_path, 'r') as f:
-        project_config = json.load(f)
-    
-    # GPIO config is stored under project.gpio_config
-    project_data = project_config.get('project', {})
-    gpio_configs = project_data.get('gpio_config', {})
-    if not gpio_configs:
-        console.print("[yellow]No GPIO configuration found in project.json[/yellow]")
-        console.print("[dim]Run 'cf gpio-config' to configure GPIOs.[/dim]")
-        return
-    
-    # Detect project type
-    project_type = project_data.get('type')
-    if not project_type:
-        project_type = detect_project_type(project_root)
-    
-    # Determine GPIO range based on project type
-    if project_type == 'caravan':
-        user_gpio_range = list(range(0, 32))
-        gpio_label = "Caravan"
-    else:
-        user_gpio_range = list(range(5, 38))
-        gpio_label = "Caravel"
-    
-    user_to_real_map = {g: g for g in user_gpio_range}
-    
-    # Convert string keys back to int if needed
-    gpio_configs_int = {}
-    for k, v in gpio_configs.items():
-        try:
-            gpio_configs_int[int(k)] = v
-        except (ValueError, TypeError):
-            gpio_configs_int[k] = v
-    
-    def find_mode_key(mode_value):
-        """Find the mode key for a given mode value (handles hex values)."""
-        if not mode_value:
-            return None
-        # First, try to convert hex to mode constant name
-        mode_name = GPIO_HEX_TO_MODE.get(mode_value, mode_value)
-        # Then find the short key for that mode constant
-        for key, name in GPIO_MODES.items():
-            if name == mode_name and key != "invalid":
-                return key
-        return None
-    
-    def format_gpio_ranges(gpio_list):
-        """Convert [5,6,7,10,11,15] to '5-7, 10-11, 15'."""
-        if not gpio_list:
-            return "-"
-        gpio_list = sorted(gpio_list)
-        ranges = []
-        start = gpio_list[0]
-        end = start
-        for g in gpio_list[1:]:
-            if g == end + 1:
-                end = g
-            else:
-                ranges.append(f"{start}-{end}" if start != end else str(start))
-                start = end = g
-        ranges.append(f"{start}-{end}" if start != end else str(start))
-        return ", ".join(ranges)
-    
-    # Group by mode
-    mode_groups = {}
-    for user_gpio, real_gpio in user_to_real_map.items():
-        mode_value = gpio_configs_int.get(real_gpio)
-        mode_key = find_mode_key(mode_value) if mode_value else None
-        if mode_key not in mode_groups:
-            mode_groups[mode_key] = []
-        mode_groups[mode_key].append(user_gpio)
-    
-    console.print(f"\n[bold cyan]GPIO Configuration ({gpio_label})[/bold cyan]\n")
-    
-    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
-    table.add_column("Mode", style="cyan", width=24)
-    table.add_column("Count", justify="right", width=6)
-    table.add_column("GPIOs")
-    
-    # Sort by count (most common first)
-    for mode_key in sorted(mode_groups.keys(), key=lambda k: -len(mode_groups[k])):
-        gpios = mode_groups[mode_key]
-        display_name = mode_key if mode_key else "[red]unconfigured[/red]"
-        style = ""
-        if mode_key:
-            if "output" in mode_key: style = "[green]"
-            elif "input" in mode_key: style = "[cyan]"
-            elif "bidirectional" in mode_key: style = "[yellow]"
-            elif "analog" in mode_key: style = "[magenta]"
-            display_name = f"{style}{mode_key}[/]"
-        table.add_row(display_name, str(len(gpios)), format_gpio_ranges(gpios))
-    
-    console.print(table)
-    console.print()
 
 
 @main.command('push')
@@ -2608,12 +2508,10 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
 def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry_run):
     """Harden a macro using LibreLane (OpenLane 2).
     
-    If no macro is specified, lists all available macros.
-    
     Examples:
-        cf harden                     # List available macros
         cf harden user_proj_example   # Harden a specific macro
         cf harden user_project_wrapper
+        cf harden --list              # List available macros
     """
     from datetime import datetime
     
@@ -2641,13 +2539,17 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
         return
     
-    # If no macro specified, default to listing available macros
+    # If no macro specified, show prompt with available macros
+    no_macro_specified = not macro and not list_designs
     if not macro:
         list_designs = True
     
     # List designs if requested (or if no macro specified)
     if list_designs:
-        console.print("[bold cyan]Available macros:[/bold cyan]")
+        if no_macro_specified:
+            console.print("[yellow]Please specify a macro from this list:[/yellow]")
+        else:
+            console.print("[bold cyan]Available macros:[/bold cyan]")
         designs = [d.name for d in openlane_dir.iterdir() if d.is_dir() and ((d / 'config.json').exists() or (d / 'config.yaml').exists() or (d / 'config.tcl').exists())]
         if designs:
             for design in sorted(designs):
