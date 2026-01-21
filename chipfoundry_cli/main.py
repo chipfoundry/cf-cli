@@ -731,7 +731,7 @@ def gpio_config(project_root, view):
         }
         
         .mode-btn-output {
-            color: green;
+            color: ansi_bright_green;
         }
         
         .mode-btn-input {
