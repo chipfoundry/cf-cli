@@ -7,7 +7,7 @@ from chipfoundry_cli.utils import (
     open_html_in_browser, download_with_progress, update_repo_files,
     fetch_versions_from_upstream, parse_user_defines_v, update_user_defines_v,
     get_gpio_config_from_project_json, save_gpio_config_to_project_json,
-    GPIO_MODES, GPIO_MODE_DESCRIPTIONS
+    GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE
 )
 import os
 from pathlib import Path
@@ -527,7 +527,7 @@ def gpio_config(project_root):
         table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
         table.add_column("Mode", style="cyan", width=24)
         table.add_column("Count", justify="right", width=6)
-        table.add_column("GPIOs", style="white")
+        table.add_column("GPIOs")
         
         # Sort by count (most common first)
         for mode_key in sorted(mode_groups.keys(), key=lambda k: -len(mode_groups[k])):
@@ -576,7 +576,7 @@ def gpio_config(project_root):
         if not mode_key:
             return "red"
         elif "output" in mode_key:
-            return "green"
+            return "ansi_bright_blue"
         elif "input" in mode_key:
             return "cyan"
         elif "bidirectional" in mode_key:
@@ -838,7 +838,7 @@ def gpio_config(project_root):
     class GPIOGridApp(App):
         """Textual app for GPIO grid configuration."""
         
-        GRID_COLS = 4  # Number of columns in the grid
+        GRID_COLS = 6  # Number of columns in the grid
         
         CSS = """
         Screen {
@@ -864,21 +864,21 @@ def gpio_config(project_root):
         }
         
         #gpio-grid {
-            grid-size: 4;
-            grid-gutter: 1;
-            padding: 1;
+            grid-size: 6;
+            grid-gutter: 0;
+            padding: 0;
             height: auto;
             width: 100%;
         }
         
         GPIOButton {
             width: 1fr;
-            min-width: 24;
+            min-width: 20;
             height: 4;
             text-align: center;
-            border: solid green;
+            border: solid grey;
             content-align: center middle;
-            padding: 0 1;
+            padding: 0;
         }
         
         GPIOButton.current {
@@ -1089,10 +1089,9 @@ def gpio_config(project_root):
             """Open mode selection for selected GPIOs."""
             selected = self._get_selected_gpios()
             if not selected:
-                # If nothing selected, use the focused one
-                focused = self.focused
-                if isinstance(focused, GPIOButton):
-                    selected = [focused.gpio_num]
+                # If nothing selected, use the current one (where cursor is)
+                if 0 <= self.current_index < len(self.gpio_list):
+                    selected = [self.gpio_list[self.current_index]]
             
             if selected:
                 self.push_screen(ModeSelectScreen(selected), self._apply_mode)
@@ -1102,9 +1101,9 @@ def gpio_config(project_root):
             if mode_key:
                 selected = self._get_selected_gpios()
                 if not selected:
-                    focused = self.focused
-                    if isinstance(focused, GPIOButton):
-                        selected = [focused.gpio_num]
+                    # Use current one if nothing selected
+                    if 0 <= self.current_index < len(self.gpio_list):
+                        selected = [self.gpio_list[self.current_index]]
                 
                 for gpio_num in selected:
                     real_gpio = self.user_to_real_map[gpio_num]
@@ -1197,6 +1196,119 @@ def gpio_config(project_root):
             #     console.print("[dim]Run 'cf setup' to install Caravel, or run the script manually after setup.[/dim]")
         except Exception as e:
             console.print(f"[red]Error updating user_defines.v: {e}[/red]")
+
+
+@main.command('gpio-status')
+@click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
+def gpio_status(project_root):
+    """Display current GPIO configuration summary."""
+    if not project_root:
+        project_root = os.getcwd()
+    
+    project_root = Path(project_root)
+    
+    # Load project config
+    project_json_path = project_root / '.cf' / 'project.json'
+    if not project_json_path.exists():
+        console.print("[red]Error: No project configuration found.[/red]")
+        console.print("[dim]Run 'cf gpio-config' first to configure GPIOs.[/dim]")
+        return
+    
+    with open(project_json_path, 'r') as f:
+        project_config = json.load(f)
+    
+    # GPIO config is stored under project.gpio_config
+    project_data = project_config.get('project', {})
+    gpio_configs = project_data.get('gpio_config', {})
+    if not gpio_configs:
+        console.print("[yellow]No GPIO configuration found in project.json[/yellow]")
+        console.print("[dim]Run 'cf gpio-config' to configure GPIOs.[/dim]")
+        return
+    
+    # Detect project type
+    project_type = project_data.get('type')
+    if not project_type:
+        project_type = detect_project_type(project_root)
+    
+    # Determine GPIO range based on project type
+    if project_type == 'caravan':
+        user_gpio_range = list(range(0, 32))
+        gpio_label = "Caravan"
+    else:
+        user_gpio_range = list(range(5, 38))
+        gpio_label = "Caravel"
+    
+    user_to_real_map = {g: g for g in user_gpio_range}
+    
+    # Convert string keys back to int if needed
+    gpio_configs_int = {}
+    for k, v in gpio_configs.items():
+        try:
+            gpio_configs_int[int(k)] = v
+        except (ValueError, TypeError):
+            gpio_configs_int[k] = v
+    
+    def find_mode_key(mode_value):
+        """Find the mode key for a given mode value (handles hex values)."""
+        if not mode_value:
+            return None
+        # First, try to convert hex to mode constant name
+        mode_name = GPIO_HEX_TO_MODE.get(mode_value, mode_value)
+        # Then find the short key for that mode constant
+        for key, name in GPIO_MODES.items():
+            if name == mode_name and key != "invalid":
+                return key
+        return None
+    
+    def format_gpio_ranges(gpio_list):
+        """Convert [5,6,7,10,11,15] to '5-7, 10-11, 15'."""
+        if not gpio_list:
+            return "-"
+        gpio_list = sorted(gpio_list)
+        ranges = []
+        start = gpio_list[0]
+        end = start
+        for g in gpio_list[1:]:
+            if g == end + 1:
+                end = g
+            else:
+                ranges.append(f"{start}-{end}" if start != end else str(start))
+                start = end = g
+        ranges.append(f"{start}-{end}" if start != end else str(start))
+        return ", ".join(ranges)
+    
+    # Group by mode
+    mode_groups = {}
+    for user_gpio, real_gpio in user_to_real_map.items():
+        mode_value = gpio_configs_int.get(real_gpio)
+        mode_key = find_mode_key(mode_value) if mode_value else None
+        if mode_key not in mode_groups:
+            mode_groups[mode_key] = []
+        mode_groups[mode_key].append(user_gpio)
+    
+    console.print(f"\n[bold cyan]GPIO Configuration ({gpio_label})[/bold cyan]\n")
+    
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    table.add_column("Mode", style="cyan", width=24)
+    table.add_column("Count", justify="right", width=6)
+    table.add_column("GPIOs")
+    
+    # Sort by count (most common first)
+    for mode_key in sorted(mode_groups.keys(), key=lambda k: -len(mode_groups[k])):
+        gpios = mode_groups[mode_key]
+        display_name = mode_key if mode_key else "[red]unconfigured[/red]"
+        style = ""
+        if mode_key:
+            if "output" in mode_key: style = "[green]"
+            elif "input" in mode_key: style = "[cyan]"
+            elif "bidirectional" in mode_key: style = "[yellow]"
+            elif "analog" in mode_key: style = "[magenta]"
+            display_name = f"{style}{mode_key}[/]"
+        table.add_row(display_name, str(len(gpios)), format_gpio_ranges(gpios))
+    
+    console.print(table)
+    console.print()
+
 
 @main.command('push')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
@@ -2496,10 +2608,12 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
 def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry_run):
     """Harden a macro using LibreLane (OpenLane 2).
     
+    If no macro is specified, lists all available macros.
+    
     Examples:
-        cf harden user_proj_example
+        cf harden                     # List available macros
+        cf harden user_proj_example   # Harden a specific macro
         cf harden user_project_wrapper
-        cf harden --list
     """
     from datetime import datetime
     
@@ -2512,8 +2626,8 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     
     project_root_path = Path(project_root)
     
-    # Check if project is initialized (skip check for --list, allow graceful return)
-    if not list_designs:
+    # Check if project is initialized (skip check for --list or when no macro specified, allow graceful return)
+    if not list_designs and macro:
         if not check_project_initialized(project_root_path, 'harden', dry_run=dry_run, allow_graceful=True):
             console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
             console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
@@ -2527,7 +2641,11 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
         return
     
-    # List designs if requested
+    # If no macro specified, default to listing available macros
+    if not macro:
+        list_designs = True
+    
+    # List designs if requested (or if no macro specified)
     if list_designs:
         console.print("[bold cyan]Available macros:[/bold cyan]")
         designs = [d.name for d in openlane_dir.iterdir() if d.is_dir() and ((d / 'config.json').exists() or (d / 'config.yaml').exists() or (d / 'config.tcl').exists())]
@@ -2542,13 +2660,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
                 console.print(f"  • {design} ({config_file})")
         else:
             console.print("[yellow]No macros found in openlane/[/yellow]")
-        return
-    
-    # Macro is required if not listing
-    if not macro:
-        console.print("[red]✗[/red] Error: MACRO argument is required")
-        console.print("[yellow]Usage:[/yellow] cf harden <macro>")
-        console.print("[yellow]       [/yellow] cf harden --list")
         return
     
     # Check if macro exists
