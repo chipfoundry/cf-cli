@@ -89,8 +89,58 @@ class PrecheckUI:
         
         return Panel(header_text, border_style="cyan", box=ROUNDED)
     
-    def _create_checks_table(self) -> Table:
-        """Create the checks status table."""
+    def _get_visible_window(self, check_names: List[str], max_visible: int) -> tuple:
+        """Calculate the visible window of checks based on terminal size.
+        
+        Returns:
+            (start_idx, end_idx, above_count, below_count)
+        """
+        total = len(check_names)
+        
+        if total <= max_visible:
+            return 0, total, 0, 0
+        
+        # Find the running check index
+        running_idx = -1
+        for i, name in enumerate(check_names):
+            if name in self._progress.checks:
+                if self._progress.checks[name].status == CheckStatus.RUNNING:
+                    running_idx = i
+                    break
+        
+        # If no running check, find the last completed check
+        if running_idx < 0:
+            for i in range(len(check_names) - 1, -1, -1):
+                name = check_names[i]
+                if name in self._progress.checks:
+                    status = self._progress.checks[name].status
+                    if status in (CheckStatus.PASSED, CheckStatus.FAILED):
+                        running_idx = i
+                        break
+        
+        if running_idx < 0:
+            running_idx = 0
+        
+        # Calculate window centered on running check
+        half_window = max_visible // 2
+        start_idx = max(0, running_idx - half_window)
+        end_idx = min(total, start_idx + max_visible)
+        
+        # Adjust if we hit the end
+        if end_idx == total:
+            start_idx = max(0, total - max_visible)
+        
+        above_count = start_idx
+        below_count = total - end_idx
+        
+        return start_idx, end_idx, above_count, below_count
+    
+    def _create_checks_table(self, scrolling: bool = True) -> Group:
+        """Create the checks status table with optional scrolling.
+        
+        Args:
+            scrolling: Whether to apply scrolling (False for final results)
+        """
         table = Table(
             show_header=False,
             box=None,
@@ -104,12 +154,28 @@ class PrecheckUI:
         table.add_column("Info", width=40, no_wrap=True, justify="right")
         
         if not self._progress or not self._progress.checks:
-            return table
+            return Group(table)
         
         # Get checks in order
         check_names = self._check_order if self._check_order else list(self._progress.checks.keys())
         
-        for check_name in check_names:
+        # Calculate visible window if scrolling
+        above_count = 0
+        below_count = 0
+        if scrolling:
+            try:
+                terminal_height = self.console.size.height
+            except Exception:
+                terminal_height = 24  # Default fallback
+            
+            max_visible = max(self.MIN_VISIBLE_CHECKS, terminal_height - self.RESERVED_LINES)
+            start_idx, end_idx, above_count, below_count = self._get_visible_window(check_names, max_visible)
+            visible_checks = check_names[start_idx:end_idx]
+        else:
+            visible_checks = check_names
+        
+        # Build table rows
+        for check_name in visible_checks:
             if check_name not in self._progress.checks:
                 continue
             
@@ -150,7 +216,18 @@ class PrecheckUI:
             
             table.add_row(status_text, name_text, info_text)
         
-        return table
+        # Build result with scroll indicators
+        components = []
+        
+        if above_count > 0:
+            components.append(Text(f"     ↑ {above_count} more above", style="dim italic"))
+        
+        components.append(table)
+        
+        if below_count > 0:
+            components.append(Text(f"     ↓ {below_count} more below", style="dim italic"))
+        
+        return Group(*components)
     
     def _create_progress_bar(self) -> Text:
         """Create a simple progress indicator."""
@@ -246,8 +323,8 @@ class PrecheckUI:
         self.console.print(self._create_header())
         self.console.print()
         
-        # Print all checks with final status
-        self.console.print(self._create_checks_table())
+        # Print all checks with final status (no scrolling for final output)
+        self.console.print(self._create_checks_table(scrolling=False))
         
         # Print error details for failed checks
         failed_checks = [
