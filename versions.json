@@ -1,7 +1,7 @@
 {
   "mpw_tags": {
-    "sky130A": "CC2509",
-    "sky130B": "2024.09.12-1"
+    "sky130A": "2026.2.9",
+    "sky130B": "2026.2.9"
   },
   "openlane_version": "CI2511",
   "open_pdks_commits": {
