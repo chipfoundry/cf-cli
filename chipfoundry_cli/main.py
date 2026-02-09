@@ -3106,7 +3106,7 @@ def precheck(project_root, disable_lvs, checks, dry_run):
 @click.option('--sim', type=click.Choice(['rtl', 'gl'], case_sensitive=False), default='rtl', help='Simulation type: rtl or gl (gate-level)')
 @click.option('--list', 'list_tests', is_flag=True, help='List all available cocotb tests')
 @click.option('--all', 'run_all', is_flag=True, help='Run all tests')
-@click.option('--tag', help='Test list tag/yaml file (e.g., user_proj_tests)')
+@click.option('--tag', help='Test list tag/yaml file (e.g., all_tests or user_proj_tests)')
 @click.option('--dry-run', is_flag=True, help='Show the configuration without running')
 def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     """Run cocotb verification tests.
@@ -3116,7 +3116,7 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         cf verify counter_la                # Run a specific test (RTL)
         cf verify counter_la --sim gl       # Run gate-level simulation
         cf verify --all                     # Run all tests
-        cf verify --tag user_proj_tests     # Run tests from a yaml list
+        cf verify --tag all_tests           # Run tests from a yaml list
     """
     # If .cf/project.json exists in cwd, use it as default project_root
     cwd_root, _ = get_project_json_from_cwd()
@@ -3247,8 +3247,13 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         if test:
             console.print(f"Would run: {caravel_cocotb_bin} -t {test} -sim {sim_arg}{openframe_flag}")
         elif run_all:
-            yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
-            console.print(f"Would run: {caravel_cocotb_bin} -tl user_proj_tests/{yaml_file} -sim {sim_arg}{openframe_flag}")
+            all_tests_yaml = cocotb_dir / ('all_tests_gl.yaml' if sim.lower() == 'gl' else 'all_tests.yaml')
+            if all_tests_yaml.exists():
+                yaml_path = all_tests_yaml.name
+            else:
+                yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+                yaml_path = f'user_proj_tests/{yaml_file}'
+            console.print(f"Would run: {caravel_cocotb_bin} -tl {yaml_path} -sim {sim_arg}{openframe_flag}")
         elif tag:
             console.print(f"Would run: {caravel_cocotb_bin} -tl {tag} -sim {sim_arg}{openframe_flag}")
         return
@@ -3267,9 +3272,14 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     if test:
         cmd.extend(['-t', test])
     elif run_all:
-        # Use the appropriate test list yaml
-        yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
-        yaml_path = f'user_proj_tests/{yaml_file}'
+        # Look for test list yaml - prefer all_tests.yaml, fall back to user_proj_tests/
+        all_tests_yaml = cocotb_dir / ('all_tests_gl.yaml' if sim.lower() == 'gl' else 'all_tests.yaml')
+        if all_tests_yaml.exists():
+            yaml_path = all_tests_yaml.name
+        else:
+            # Fall back to legacy user_proj_tests directory
+            yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+            yaml_path = f'user_proj_tests/{yaml_file}'
         cmd.extend(['-tl', yaml_path])
     elif tag:
         # User specified a custom test list
