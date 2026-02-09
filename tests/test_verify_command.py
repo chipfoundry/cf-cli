@@ -1,6 +1,7 @@
 """
 Unit tests for cf verify command.
 """
+import json
 import pytest
 from click.testing import CliRunner
 from chipfoundry_cli.main import main
@@ -18,6 +19,15 @@ def temp_project_dir():
     # Cleanup
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
+
+
+def _ensure_project_json(project_root: str) -> None:
+    """Create minimal .cf/project.json so verify command can read project type."""
+    cf_dir = Path(project_root) / ".cf"
+    cf_dir.mkdir(parents=True, exist_ok=True)
+    project_json = cf_dir / "project.json"
+    if not project_json.exists():
+        project_json.write_text(json.dumps({"project": {"type": "digital"}}))
 
 
 class TestVerifyCommand:
@@ -39,6 +49,7 @@ class TestVerifyCommand:
     
     def test_verify_list(self, temp_project_dir):
         """Test verify command with --list flag."""
+        _ensure_project_json(temp_project_dir)
         runner = CliRunner()
         result = runner.invoke(main, [
             'verify',
@@ -46,7 +57,7 @@ class TestVerifyCommand:
             '--list'
         ])
         
-        # Command returns 0 even on error, just prints error message
+        # Command returns 0; with no cocotb dir it prints a message, with cocotb it lists tests
         assert result.exit_code == 0
         assert 'cocotb' in result.output.lower() or 'list' in result.output.lower()
     

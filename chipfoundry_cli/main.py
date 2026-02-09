@@ -1915,6 +1915,19 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     # Check if project is initialized (allow dry-run to proceed)
     check_project_initialized(project_root_path, 'setup', dry_run=dry_run)
     
+    # Read project type from project.json
+    project_json_path = project_root_path / '.cf' / 'project.json'
+    project_type = 'digital'  # default
+    if project_json_path.exists():
+        try:
+            with open(project_json_path, 'r') as f:
+                project_data = json.load(f)
+            project_type = project_data.get('project', {}).get('type', 'digital')
+        except (json.JSONDecodeError, IOError):
+            pass  # Use default if we can't read it
+    
+    is_openframe = project_type == 'openframe'
+    
     had_errors = False
 
     def _error_text(err):
@@ -1943,7 +1956,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     # If in "only" mode, only install what's specified
     # If not in "only" mode, install everything
     install_caravel = only_caravel or not only_mode
-    install_mcw = only_mcw or not only_mode
+    # MCW is not used for openframe projects
+    install_mcw = (only_mcw or not only_mode) and not is_openframe
     install_openlane = only_openlane or not only_mode
     install_pdk = only_pdk or not only_mode
     install_timing = only_timing or not only_mode
@@ -1956,8 +1970,12 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         f"Project directory: [yellow]{project_root}[/yellow]",
         f"Repository: [yellow]{repo_owner}/{repo_name}@{branch}[/yellow]",
         f"PDK: [yellow]{pdk}[/yellow]",
+        f"Project type: [yellow]{project_type}[/yellow]",
         f"Caravel variant: [yellow]{'caravel-lite' if caravel_lite else 'caravel'}[/yellow]",
     ]
+    
+    if is_openframe:
+        config_lines.append("[dim]MCW not needed for openframe projects[/dim]")
     
     if only_mode:
         installing = []
@@ -2057,7 +2075,11 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     console.print(f"[dim]{e.stderr}[/dim]")
     
     # Step 3: Install Management Core Wrapper
-    if install_mcw:
+    # Show message if user explicitly requested MCW but project is openframe
+    if only_mcw and is_openframe:
+        console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
+        console.print("[yellow]⚠[/yellow] MCW is not used for openframe projects, skipping...")
+    elif install_mcw:
         console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
         mcw_dir = project_root_path / 'mgmt_core_wrapper'
         
@@ -3084,7 +3106,7 @@ def precheck(project_root, disable_lvs, checks, dry_run):
 @click.option('--sim', type=click.Choice(['rtl', 'gl'], case_sensitive=False), default='rtl', help='Simulation type: rtl or gl (gate-level)')
 @click.option('--list', 'list_tests', is_flag=True, help='List all available cocotb tests')
 @click.option('--all', 'run_all', is_flag=True, help='Run all tests')
-@click.option('--tag', help='Test list tag/yaml file (e.g., user_proj_tests)')
+@click.option('--tag', help='Test list tag/yaml file (e.g., all_tests or user_proj_tests)')
 @click.option('--dry-run', is_flag=True, help='Show the configuration without running')
 def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     """Run cocotb verification tests.
@@ -3094,7 +3116,7 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         cf verify counter_la                # Run a specific test (RTL)
         cf verify counter_la --sim gl       # Run gate-level simulation
         cf verify --all                     # Run all tests
-        cf verify --tag user_proj_tests     # Run tests from a yaml list
+        cf verify --tag all_tests           # Run tests from a yaml list
     """
     # If .cf/project.json exists in cwd, use it as default project_root
     cwd_root, _ = get_project_json_from_cwd()
@@ -3114,13 +3136,13 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     
     project_json_path = project_root_path / '.cf' / 'project.json'
     
+    # Get project type (needed for openframe flag)
+    with open(project_json_path, 'r') as f:
+        project_data = json.load(f)
+    project_type = project_data.get('project', {}).get('type', 'digital')
+    
     # Check if GPIO configuration exists (skip check if just listing tests or openframe)
     if not list_tests:
-        # Check project type - GPIO config not needed for openframe
-        with open(project_json_path, 'r') as f:
-            project_data = json.load(f)
-        project_type = project_data.get('project', {}).get('type', 'digital')
-        
         if project_type != 'openframe':
             gpio_config = get_gpio_config_from_project_json(str(project_json_path))
             if not gpio_config or len(gpio_config) == 0:
@@ -3221,13 +3243,19 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     
     if dry_run:
         console.print("[bold yellow]Dry run - configuration ready[/bold yellow]\n")
+        openframe_flag = " --openframe" if project_type == 'openframe' else ""
         if test:
-            console.print(f"Would run: {caravel_cocotb_bin} -t {test} -sim {sim_arg}")
+            console.print(f"Would run: {caravel_cocotb_bin} -t {test} -sim {sim_arg}{openframe_flag}")
         elif run_all:
-            yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
-            console.print(f"Would run: {caravel_cocotb_bin} -tl user_proj_tests/{yaml_file} -sim {sim_arg}")
+            all_tests_yaml = cocotb_dir / ('all_tests_gl.yaml' if sim.lower() == 'gl' else 'all_tests.yaml')
+            if all_tests_yaml.exists():
+                yaml_path = all_tests_yaml.name
+            else:
+                yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+                yaml_path = f'user_proj_tests/{yaml_file}'
+            console.print(f"Would run: {caravel_cocotb_bin} -tl {yaml_path} -sim {sim_arg}{openframe_flag}")
         elif tag:
-            console.print(f"Would run: {caravel_cocotb_bin} -tl {tag} -sim {sim_arg}")
+            console.print(f"Would run: {caravel_cocotb_bin} -tl {tag} -sim {sim_arg}{openframe_flag}")
         return
     
     # Prepare environment
@@ -3244,9 +3272,14 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     if test:
         cmd.extend(['-t', test])
     elif run_all:
-        # Use the appropriate test list yaml
-        yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
-        yaml_path = f'user_proj_tests/{yaml_file}'
+        # Look for test list yaml - prefer all_tests.yaml, fall back to user_proj_tests/
+        all_tests_yaml = cocotb_dir / ('all_tests_gl.yaml' if sim.lower() == 'gl' else 'all_tests.yaml')
+        if all_tests_yaml.exists():
+            yaml_path = all_tests_yaml.name
+        else:
+            # Fall back to legacy user_proj_tests directory
+            yaml_file = 'user_proj_tests_gl.yaml' if sim.lower() == 'gl' else 'user_proj_tests.yaml'
+            yaml_path = f'user_proj_tests/{yaml_file}'
         cmd.extend(['-tl', yaml_path])
     elif tag:
         # User specified a custom test list
@@ -3269,6 +3302,13 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
     
     if sim.lower() == 'gl':
         cmd.extend(['-sim', 'GL'])
+    
+    # Add openframe flag for openframe projects
+    if project_type == 'openframe':
+        cmd.append('--openframe')
+    
+    # Add CI flag to disable Docker interactive mode (required when not running in a terminal)
+    cmd.append('--CI')
     
     # Run cocotb tests
     console.print(f"[cyan]Running cocotb verification...[/cyan]")
