@@ -2374,8 +2374,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         console.print(f"\n[bold]Step {step_num}:[/bold] Setting up Cocotb...")
         venv_cocotb = project_root_path / 'venv-cocotb'
         
-        # Check if already installed
-        is_installed = check_python_package_installed(venv_cocotb, 'caravel-cocotb')
+        # Check if already installed (package name is caravel_cocotb in pyproject.toml)
+        is_installed = check_python_package_installed(venv_cocotb, 'caravel_cocotb')
         
         if is_installed and not overwrite:
             console.print("[green]✓[/green] Cocotb already installed")
@@ -2402,14 +2402,18 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     # Determine the python executable path in venv
                     venv_python = str(venv_cocotb / 'bin' / 'python3')
                     
-                    console.print("[cyan]Installing caravel-cocotb...[/cyan]")
+                    console.print("[cyan]Installing caravel-cocotb from source (chipfoundry/caravel-sim-infrastructure)...[/cyan]")
                     subprocess.run(
                         [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'pip'],
                         check=True,
                         capture_output=True
                     )
+                    # Install from GitHub source (workaround: PyPI package is under efabless, we use chipfoundry repo)
                     subprocess.run(
-                        [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'caravel-cocotb'],
+                        [
+                            venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir',
+                            'git+https://github.com/chipfoundry/caravel-sim-infrastructure.git@main#subdirectory=cocotb'
+                        ],
                         check=True,
                         capture_output=True
                     )
