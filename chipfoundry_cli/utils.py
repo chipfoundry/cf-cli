@@ -30,21 +30,12 @@ def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
     Collect required project files from the given project_root.
     Returns a dict mapping logical names to absolute file paths (or None if not found and optional).
     Raises FileNotFoundError if any required file is missing.
+    Openframe projects do not require user_defines.v.
     """
     project_root = Path(project_root)
     collected = {}
-    
-    # Collect standard required files
-    for rel_path, required in REQUIRED_FILES.items():
-        abs_path = project_root / rel_path
-        if abs_path.exists():
-            collected[rel_path] = str(abs_path)
-        elif required:
-            raise FileNotFoundError(f"Required file not found: {abs_path}")
-        else:
-            collected[rel_path] = None
-    
-    # Collect GDS file based on what exists
+
+    # Collect GDS file first to determine project type (affects whether user_defines.v is required)
     gds_dir = project_root / 'gds'
     if gds_dir.exists():
         found_gds_files = []
@@ -107,7 +98,22 @@ def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
         
         gds_name, gds_path = gds_file_to_use
         collected[f"gds/{gds_name}"] = gds_path
-    
+
+        # Collect standard required files (user_defines.v not required for openframe)
+        cf_json_path = project_root / ".cf" / "project.json"
+        collected[".cf/project.json"] = str(cf_json_path) if cf_json_path.exists() else None
+
+        user_defines_path = project_root / "verilog" / "rtl" / "user_defines.v"
+        if project_type == "openframe":
+            collected["verilog/rtl/user_defines.v"] = None  # openframe does not use user_defines.v
+        else:
+            if user_defines_path.exists():
+                collected["verilog/rtl/user_defines.v"] = str(user_defines_path)
+            else:
+                raise FileNotFoundError(f"Required file not found: {user_defines_path}")
+    else:
+        raise FileNotFoundError(f"No GDS directory found at {gds_dir}. Expected one of: {list(GDS_TYPE_MAP.keys())}")
+
     return collected
 
 def ensure_cf_directory(target_dir: str):

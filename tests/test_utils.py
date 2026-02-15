@@ -139,6 +139,18 @@ class TestCollectProjectFiles:
             collect_project_files(temp_project_dir)
         assert 'compressed and uncompressed' in str(exc_info.value).lower()
 
+    def test_collect_openframe_without_user_defines_v(self, temp_project_dir):
+        """Test that openframe projects do not require user_defines.v."""
+        project_root = Path(temp_project_dir)
+        gds_dir = project_root / 'gds'
+        gds_dir.mkdir(parents=True, exist_ok=True)
+        (gds_dir / 'openframe_project_wrapper.gds').write_text('gds')
+        # No verilog/rtl/user_defines.v
+
+        collected = collect_project_files(temp_project_dir)
+        assert 'gds/openframe_project_wrapper.gds' in collected
+        assert collected['verilog/rtl/user_defines.v'] is None
+
 
 class TestEnsureCfDirectory:
     """Test ensure_cf_directory function."""

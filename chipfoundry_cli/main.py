@@ -1313,9 +1313,10 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
     sftp_base = f"incoming/projects/{final_project_name}"
     upload_map = {
         ".cf/project.json": project_json_path,
-        "verilog/rtl/user_defines.v": collected["verilog/rtl/user_defines.v"],
     }
-    
+    if detected_type != "openframe":
+        upload_map["verilog/rtl/user_defines.v"] = collected.get("verilog/rtl/user_defines.v")
+
     # Add the appropriate GDS file based on what was collected
     for gds_key, gds_path in collected.items():
         if gds_key.startswith("gds/"):
