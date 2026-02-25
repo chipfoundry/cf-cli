@@ -50,7 +50,7 @@ cf --help
    cf keygen
    ```
 
-5. **Register your key** at [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
+5. **Register your key** at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
 
 6. **Configure your credentials**:
    ```bash
@@ -86,7 +86,7 @@ If you already have a project with a Makefile:
    cf keygen
    ```
 
-2. **Register your key** at [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
+2. **Register your key** at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
 
 3. **Configure your credentials**:
    ```bash
@@ -175,7 +175,7 @@ cf keygen [--overwrite]
 - Generates a new RSA SSH key at `~/.ssh/chipfoundry-key`
 - Displays the public key for registration
 - Use `--overwrite` to regenerate an existing key
-- **Next step**: Submit the public key to [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
+- **Next step**: Submit the public key to [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
 
 ### View SSH Key
 
@@ -748,7 +748,7 @@ The CLI tracks your project submission state through the `submission_state` fiel
 ```bash
 # Generate SSH key and register it
 cf keygen
-# Copy the displayed key to https://chipfoundry.io/sftp-registration
+# Copy the displayed key to https://platform.chipfoundry.io/ssh-key
 
 # Configure your account
 cf config
@@ -836,7 +836,7 @@ gds/user_project_wrapper.gds.gz   # ← Remove this one
 
 - **Authentication errors:**
   - Run `cf keygen` to generate a new key
-  - Ensure your key is registered at [https://chipfoundry.io/sftp-registration](https://chipfoundry.io/sftp-registration)
+  - Ensure your key is registered at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
   - Check your username with `cf config`
 
 - **SFTP errors:**
