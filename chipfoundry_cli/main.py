@@ -1555,12 +1555,24 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
             transport.close()
             console.print(f"[dim]Disconnected from {sftp_host}[/dim]")
 
-    # --- Show platform review notes ---
+    # --- Platform sync and review notes ---
     platform_id = _load_project_platform_id(".")
     pull_config = load_user_config()
     api_key = pull_config.get("api_key")
 
     if platform_id and api_key:
+        # Sync local project.json to platform
+        local_pj = os.path.join(".", ".cf", "project.json")
+        if os.path.exists(local_pj):
+            try:
+                import json as _json
+                with open(local_pj, "r") as f:
+                    pj = _json.load(f)
+                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj})
+                console.print("[green]✓ Platform project synced[/green]")
+            except (SystemExit, Exception):
+                pass
+
         try:
             project = _api_get(f"/projects/{platform_id}")
             status = project.get("status", "")
