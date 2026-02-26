@@ -3,13 +3,13 @@
 [![PyPI version](https://img.shields.io/pypi/v/chipfoundry-cli?color=blue)](https://badge.fury.io/py/chipfoundry-cli)
 [![PyPI downloads](https://img.shields.io/pypi/dm/chipfoundry-cli.svg)](https://pypi.org/project/chipfoundry-cli/)
 
-A command-line tool to automate the submission of ChipFoundry projects to the SFTP server and manage project results.
+A command-line tool for managing ChipFoundry ASIC projects — from authentication and project setup to SFTP submission and platform sync.
 
 ---
 
 ## Overview
 
-`cf-cli` is a user-friendly command-line tool for securely submitting your ChipFoundry project files to the official SFTP server and downloading project results. It automatically collects the required files, generates or updates your project configuration, uploads everything to the correct location on the server, and provides tools to view project results and reports.
+`cf-cli` is a command-line tool that integrates with the ChipFoundry platform for end-to-end project management. It handles browser-based authentication, project registration, SFTP file transfers, and platform synchronization. When you push or pull, the CLI uploads your files via SFTP and syncs project metadata (GDS hash, version, project ID, slot number) with the platform.
 
 ---
 
@@ -26,96 +26,88 @@ cf --help
 
 ## Quick Start
 
-### For New Projects (Starting from Template)
+### For New Projects
 
-1. **Clone the template** (or create new directory):
+1. **Log in to the platform**:
+   ```bash
+   cf login
+   ```
+
+2. **Clone the template** (or create new directory):
    ```bash
    git clone https://github.com/chipfoundry/caravel_user_project my_project
    cd my_project
    ```
 
-2. **Initialize your project** (required first step):
+3. **Initialize your project** (registers on platform and selects shuttle):
    ```bash
    cf init
    ```
-   This creates `.cf/project.json` with project metadata. **Must be run before any other commands.**
 
-3. **Set up the project** (replaces `make setup`):
+4. **Set up the project** (replaces `make setup`):
    ```bash
    cf setup
    ```
 
-4. **Generate SSH Key** (if you don't have one):
+5. **Generate SSH Key** (if you don't have one):
    ```bash
    cf keygen
    ```
 
-5. **Register your key** at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
+6. **Register your key** at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
 
-6. **Configure your credentials**:
+7. **Configure SFTP credentials**:
    ```bash
    cf config
    ```
 
-7. **Upload your project**:
+8. **Upload your project** (SFTP + platform sync):
    ```bash
    cf push
    ```
 
-8. **Download results** (when available):
+9. **Download results** (when available):
    ```bash
    cf pull
    ```
 
-9. **View tapeout report**:
-   ```bash
-   cf view-tapeout-report
-   ```
+10. **View tapeout report**:
+    ```bash
+    cf view-tapeout-report
+    ```
 
-10. **Confirm final tapeout** (when ready to send GDS to foundry):
-   ```bash
-   cf confirm
-   ```
+11. **Confirm final tapeout** (when ready to send GDS to foundry):
+    ```bash
+    cf confirm
+    ```
 
 ### For Existing Projects
 
-If you already have a project with a Makefile:
+If you already have a project directory with GDS files:
 
-1. **Generate SSH Key** (if you don't have one):
+1. **Log in and set up SFTP**:
    ```bash
-   cf keygen
+   cf login
+   cf keygen        # if you don't have an SSH key
+   cf config        # set SFTP username and key path
+   ```
+   Register your key at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
+
+2. **Initialize and link to the platform**:
+   ```bash
+   cf init          # creates .cf/project.json and registers on platform
+   ```
+   Or, if the project already exists on the platform:
+   ```bash
+   cf init          # creates .cf/project.json locally
+   cf link          # links to existing platform project
    ```
 
-2. **Register your key** at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
-
-3. **Configure your credentials**:
+3. **Upload, download, and confirm**:
    ```bash
-   cf config
-   ```
-
-4. **Initialize your project**:
-   ```bash
-   cf init
-   ```
-
-5. **Upload your project**:
-   ```bash
-   cf push
-   ```
-
-6. **Download results** (when available):
-   ```bash
-   cf pull
-   ```
-
-7. **View tapeout report**:
-   ```bash
-   cf view-tapeout-report
-   ```
-
-8. **Confirm final tapeout** (when ready to send GDS to foundry):
-   ```bash
-   cf confirm
+   cf push          # upload files + sync with platform
+   cf pull          # download results + view review notes
+   cf confirm       # confirm final tapeout
    ```
 
 ---
@@ -149,7 +141,21 @@ my_project/
 
 ## Authentication
 
-The CLI uses SSH key authentication for secure SFTP access:
+### Platform Authentication
+
+The CLI uses browser-based login for platform access:
+
+```bash
+cf login     # opens browser to authenticate, stores API key
+cf whoami    # show current user
+cf logout    # clear stored credentials
+```
+
+Credentials are stored in `~/.chipfoundry-cli/config.toml`.
+
+### SFTP Authentication
+
+SFTP file transfers use SSH key authentication:
 
 - **Default key location**: `~/.ssh/chipfoundry-key` (generated by `cf keygen`)
 - **Alternative key**: Specify with `--sftp-key` option
@@ -187,7 +193,7 @@ cf keyview
 - Useful for viewing your key without generating a new one
 - Shows the same registration instructions as `cf keygen`
 
-### Configure User Credentials
+### Configure SFTP Credentials
 
 ```bash
 cf config
@@ -195,7 +201,34 @@ cf config
 
 - Prompts for your SFTP username and key path
 - Defaults to `~/.ssh/chipfoundry-key`
+- Credentials are saved to `~/.chipfoundry-cli/config.toml`
 - Only needs to be run once per user/machine
+
+### Platform Login
+
+```bash
+cf login
+```
+
+- Opens your default browser to the platform login page
+- After authenticating, the CLI automatically receives your API key
+- Required before `cf init`, `cf link`, `cf push`, `cf pull`, `cf confirm`
+
+### Check Current User
+
+```bash
+cf whoami
+```
+
+- Displays the currently authenticated user (name and email)
+
+### Logout
+
+```bash
+cf logout
+```
+
+- Removes your stored API key from the local config
 
 ### Initialize a New Project
 
@@ -216,10 +249,32 @@ cf init [--project-root DIRECTORY]
 **What it does:**
 - **Smart defaults**: Auto-detects project name from directory and project type from GDS files
 - **Interactive prompts**: Shows detected values in prompts for easy acceptance
+- **Shuttle selection**: Prompts to select an available shuttle (sorted by nearest deadline)
+- **Platform registration**: Creates the project on the platform and links it automatically
 - Creates `.cf/project.json` with project metadata
 
 > [!NOTE]
 > GDS hash is generated during `push`, not `init`
+
+### Link an Existing Project
+
+```bash
+cf link
+```
+
+- Lists your platform projects and prompts you to select one
+- Stores the `platform_project_id` in `.cf/project.json`
+- Required for `cf push` and `cf pull` to sync with the platform
+- Use this when you have a local project and an existing platform project to connect them
+
+### Unlink a Project
+
+```bash
+cf unlink
+```
+
+- Removes the platform link from the current project
+- The project remains on the platform but push/pull will no longer sync
 
 ### Setup a ChipFoundry Project
 
@@ -509,19 +564,24 @@ cf verify counter_la --dry-run
 cf push [OPTIONS]
 ```
 
+**Prerequisites:** `cf login`, `cf link` (or `cf init`), `cf config`
+
 **Options:**
 - `--project-root`: Specify project directory
 - `--force-overwrite`: Overwrite existing files on SFTP
+- `--submit`: Submit the project for review after upload
 - `--dry-run`: Preview what would be uploaded
 - `--sftp-username`: Override configured username
 - `--sftp-key`: Override configured key path
 
 **What happens:**
-1. Collects required project files
-2. Auto-detects project type from GDS file
-3. Updates project configuration and GDS hash
-4. Uploads files to SFTP with progress bars
-5. Shows clean, informative output
+1. Verifies the project is linked to the platform and you are logged in
+2. Collects required project files
+3. Auto-detects project type from GDS file
+4. Updates project configuration and GDS hash
+5. Uploads files to SFTP with progress bars
+6. Syncs `project.json` data to the platform (GDS hash, version, project ID, slot number)
+7. If `--submit` is used, submits the project for admin review
 
 **GDS File Handling:**
 - **Both compressed (`.gz`) and uncompressed (`.gds`) files are supported**
@@ -536,9 +596,12 @@ cf push [OPTIONS]
 cf pull [--project-name NAME]
 ```
 
+**Prerequisites:** `cf login`, `cf link` (or `cf init`), `cf config`
+
 - Downloads project results from SFTP server
 - Saves to `sftp-output/<project_name>/`
-- **Automatically updates** your local `.cf/project.json` with the pulled version
+- **Automatically updates** your local `.cf/project.json` with the pulled version (preserving the platform link)
+- **Syncs with the platform** and displays admin review notes if your project has been reviewed
 - Creates the expected directory structure:
   ```
   sftp-output/
@@ -555,8 +618,10 @@ cf pull [--project-name NAME]
 cf confirm [OPTIONS]
 ```
 
+**Prerequisites:** `cf login`, `cf link` (or `cf init`), `cf config`
+
 - **Confirms your final tapeout** by setting `submission_state` to "Final"
-- **Uploads only the project.json** to the SFTP server (not the entire project)
+- **Uploads the project.json** to the SFTP server and **confirms on the platform**
 - **Use this when you're ready to send your current GDS file to the foundry** for tapeout processing
 - **Options:**
   - `--project-root`: Specify project directory
@@ -586,8 +651,8 @@ cf view-tapeout-report [--project-name NAME] [--report-path PATH]
 cf status
 ```
 
-- Lists all your projects on the SFTP server
-- Shows which projects have input files and/or results
+- Shows project status from the platform, including shuttle details and deadlines
+- Lists projects on the SFTP server with input/output status
 - Displays project status in a clean table format
 
 ### Repository Management
@@ -665,23 +730,30 @@ The CLI tracks your project submission state through the `submission_state` fiel
 
 ### Recommended Workflow
 
-1. **Development Phase:**
+1. **Setup Phase:**
    ```bash
-   cf init          # Creates project with submission_state: "Draft"
-   cf push          # Upload project files (state remains "Draft")
-   # ... make changes to your project ...
-   cf push          # Upload updated files (state remains "Draft")
+   cf login         # Authenticate with the platform
+   cf keygen        # Generate SSH key (if needed)
+   cf config        # Set SFTP credentials
+   cf init          # Initialize project, register on platform, select shuttle
    ```
 
-2. **Review Phase (Optional):**
+2. **Development Phase:**
    ```bash
-   cf pull          # Download results for review (if available)
+   cf push          # Upload files + sync with platform (state remains "Draft")
+   # ... make changes to your project ...
+   cf push --force-overwrite  # Upload updated files
+   ```
+
+3. **Review Phase:**
+   ```bash
+   cf pull          # Download results + view admin review notes
    cf view-tapeout-report  # Review the tapeout report (if available)
    ```
 
-3. **Final Tapeout Confirmation:**
+4. **Final Tapeout Confirmation:**
    ```bash
-   cf confirm       # Confirm current GDS file is ready for foundry tapeout
+   cf confirm       # Confirm on platform, send GDS to foundry
    ```
 
 > [!IMPORTANT]
@@ -714,10 +786,14 @@ The CLI tracks your project submission state through the `submission_state` fiel
    - Connects to the SFTP server securely
    - Creates project directory structure
    - Uploads files with progress indicators
-   - Shows clean, minimal output
 
-4. **Success:**
-   - Displays confirmation with project location
+4. **Platform Sync:**
+   - Sends the full `project.json` to the platform
+   - Updates GDS hash, project version, project ID, and slot number
+   - Records the push timestamp on the platform
+
+5. **Success:**
+   - Displays confirmation with project location and sync status
 
 ---
 
@@ -733,11 +809,15 @@ The CLI tracks your project submission state through the `submission_state` fiel
    - Saves to `sftp-output/<project_name>/`
 
 3. **Config Update:**
-   - **Automatically updates** your local `.cf/project.json` with the pulled version
-   - No manual steps required
+   - **Automatically merges** the pulled `project.json` with your local version (preserving the platform link)
 
-4. **Success:**
-   - Shows confirmation of downloaded files and updated config
+4. **Platform Sync:**
+   - Sends the updated `project.json` to the platform
+   - Records the pull timestamp on the platform
+   - Fetches and displays any admin review notes
+
+5. **Success:**
+   - Shows confirmation of downloaded files, sync status, and review notes
 
 ---
 
@@ -834,10 +914,18 @@ gds/user_project_wrapper.gds.gz   # ← Remove this one
 - **Missing files:**
   - The tool will error out if required files are missing or if more than one GDS type is present
 
-- **Authentication errors:**
+- **Platform authentication errors:**
+  - Run `cf login` to re-authenticate
+  - Run `cf whoami` to verify your login status
+
+- **SFTP authentication errors:**
   - Run `cf keygen` to generate a new key
   - Ensure your key is registered at [https://platform.chipfoundry.io/ssh-key](https://platform.chipfoundry.io/ssh-key)
   - Check your username with `cf config`
+
+- **"Project is not linked to the platform":**
+  - Run `cf link` to connect this project to a platform project
+  - Or run `cf init` to create a new platform project
 
 - **SFTP errors:**
   - Check your network connection
