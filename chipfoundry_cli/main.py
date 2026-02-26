@@ -296,44 +296,52 @@ def keyview():
 
 @main.command('init')
 @click.option('--project-root', required=False, type=click.Path(file_okay=False), help='Directory to create the project in (defaults to current directory).')
-def init(project_root):
+@click.option('--shuttle', default=None, help='Shuttle name or ID to associate with the project.')
+@click.option('--description', default=None, help='Project description.')
+def init(project_root, shuttle, description):
     """Initialize a new ChipFoundry project (.cf/project.json) in the given directory."""
     if not project_root:
         project_root = os.getcwd()
     cf_dir = Path(project_root) / '.cf'
     cf_dir.mkdir(parents=True, exist_ok=True)
     project_json_path = cf_dir / 'project.json'
+
+    existing_platform_id = None
     if project_json_path.exists():
+        with open(project_json_path) as f:
+            existing_data = json.load(f)
+        existing_platform_id = existing_data.get('project', {}).get('platform_project_id')
+        if existing_platform_id:
+            console.print(f"[yellow]This project is already linked to platform project {existing_platform_id}.[/yellow]")
+            console.print("Use [bold]cf status[/bold] to check it or [bold]cf unlink[/bold] to disconnect.")
+            return
         overwrite = console.input(f"[yellow]project.json already exists at {project_json_path}. Overwrite? (y/N): [/yellow]").strip().lower()
         if overwrite != 'y':
             console.print("[red]Aborted project initialization.[/red]")
             return
-    # Get username from user config
+
     config = load_user_config()
     username = config.get("sftp_username")
     if not username:
         console.print("[bold red]No SFTP username found in user config. Please run 'chipfoundry config' first.[/bold red]")
         raise click.Abort()
-    # Auto-detect project type from GDS file name
+
     gds_dir = Path(project_root) / 'gds'
     gds_type = None
     for gds_name, gtype in GDS_TYPE_MAP.items():
         if (gds_dir / gds_name).exists():
             gds_type = gtype
             break
-    
-    # Default project name to directory name
+
     default_name = Path(project_root).name
-    
     name = console.input(f"Project name (detected: [cyan]{default_name}[/cyan]): ").strip() or default_name
-    
-    # Suggest project type if detected
+
     if gds_type:
         project_type = console.input(f"Project type (digital/analog/openframe) (detected: [cyan]{gds_type}[/cyan]): ").strip() or gds_type
     else:
         project_type = console.input("Project type (digital/analog/openframe): ").strip()
-    version = "1"  # Start with version 1, will be auto-incremented on push
-    # No hash yet, will be filled by push
+
+    version = "1"
     data = {
         "project": {
             "name": name,
@@ -344,9 +352,65 @@ def init(project_root):
             "submission_state": "Draft"
         }
     }
+
+    api_key = config.get('api_key')
+    if api_key:
+        shuttle_id = None
+        if not shuttle:
+            try:
+                shuttles = _api_get("/shuttles/available")
+                if shuttles:
+                    console.print("\n[bold]Available shuttles:[/bold]")
+                    for i, s in enumerate(shuttles, 1):
+                        deadline = s.get('tapeout_date', '')
+                        console.print(f"  [cyan]{i}[/cyan]. {s['name']} ({s.get('process_node', '')}){f' — deadline {deadline}' if deadline else ''}")
+                    console.print(f"  [cyan]{len(shuttles) + 1}[/cyan]. Skip — choose later")
+                    choice = console.input("\nSelect shuttle: ").strip()
+                    try:
+                        idx = int(choice) - 1
+                        if 0 <= idx < len(shuttles):
+                            shuttle_id = shuttles[idx]['id']
+                    except (ValueError, IndexError):
+                        pass
+            except SystemExit:
+                console.print("[dim]Could not fetch shuttles — continuing without shuttle selection.[/dim]")
+        else:
+            shuttle_id = shuttle
+
+        create_data = {
+            "name": name,
+            "description": description or "",
+            "design_type": project_type,
+            "registration_source": "cli",
+        }
+        if shuttle_id:
+            create_data["shuttle_id"] = str(shuttle_id)
+
+        try:
+            project_resp = _api_post("/projects", create_data)
+            platform_id = project_resp.get('id')
+            data['project']['platform_project_id'] = platform_id
+
+            with open(project_json_path, 'w') as f:
+                json.dump(data, f, indent=2)
+
+            portal_url = _get_portal_url()
+            console.print(f"\n[green]✓ Project created on platform[/green]")
+            console.print(f"  Name:    {name}")
+            console.print(f"  ID:      {platform_id}")
+            if project_resp.get('shuttle_name'):
+                console.print(f"  Shuttle: {project_resp['shuttle_name']}")
+            console.print(f"  Status:  Draft")
+            console.print(f"  Portal:  {portal_url}/projects/{platform_id}")
+            return
+        except SystemExit:
+            console.print("[yellow]Platform project creation failed — saving local project only.[/yellow]")
+    else:
+        console.print("[dim]Tip: Run [bold]cf login[/bold] to connect this project to the platform.[/dim]")
+
     with open(project_json_path, 'w') as f:
         json.dump(data, f, indent=2)
-    console.print(f"[green]Initialized project at {project_json_path}[/green]")
+    console.print(f"[green]✓ Initialized project at {project_json_path}[/green]")
 
 @main.command('gpio-config')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
@@ -1463,13 +1527,124 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
             transport.close()
             console.print(f"[dim]Disconnected from {sftp_host}[/dim]")
 
+STATUS_COLORS = {
+    "DRAFT": "dim",
+    "SUBMITTED": "yellow",
+    "IN_REVIEW": "yellow",
+    "CHANGES_REQUESTED": "red",
+    "APPROVED": "green",
+    "CONFIRMED": "cyan",
+    "IN_PRODUCTION": "blue",
+    "COMPLETED": "green bold",
+    "CANCELLED": "dim red",
+}
+
+STATUS_HINTS = {
+    "DRAFT": "Run [bold]cf push[/bold] to upload your design files.",
+    "APPROVED": "Your project has been approved! Run [bold]cf confirm[/bold] to proceed.",
+    "CHANGES_REQUESTED": "Changes requested by the review team. See notes above.",
+}
+
+
+def _show_platform_status(project_root: str):
+    """Show the platform pipeline panel if the project is linked. Returns True if shown."""
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id:
+        return False
+
+    config = load_user_config()
+    if not config.get('api_key'):
+        return False
+
+    try:
+        project = _api_get(f"/projects/{platform_id}")
+    except SystemExit:
+        console.print("[yellow]⚠ Could not reach the platform API. Showing SFTP status only.[/yellow]\n")
+        return False
+
+    status_val = project.get('status', 'UNKNOWN')
+    color = STATUS_COLORS.get(status_val, "white")
+    portal_url = _get_portal_url()
+
+    lines = []
+    lines.append(f"[bold]Name:[/bold]    {project.get('name', 'Unknown')}")
+    lines.append(f"[bold]Status:[/bold]  [{color}]{status_val}[/{color}]")
+    if project.get('shuttle_name'):
+        deadline = ""
+        milestones = project.get('shuttle_milestones', [])
+        for m in milestones:
+            if m.get('label') == 'Tapeout':
+                deadline = f" (deadline: {m.get('date', 'TBD')})"
+                break
+        lines.append(f"[bold]Shuttle:[/bold] {project['shuttle_name']}{deadline}")
+    if project.get('design_type'):
+        lines.append(f"[bold]Type:[/bold]    {project['design_type']}")
+    if project.get('gds_hash'):
+        lines.append(f"[bold]GDS Hash:[/bold] {project['gds_hash'][:16]}...")
+    if project.get('updated_at'):
+        lines.append(f"[bold]Updated:[/bold] {project['updated_at'][:10]}")
+    if project.get('admin_review_notes'):
+        lines.append(f"\n[bold red]Review Notes:[/bold red] {project['admin_review_notes']}")
+    lines.append(f"\n[dim]Portal: {portal_url}/projects/{platform_id}[/dim]")
+
+    hint = STATUS_HINTS.get(status_val)
+    if hint:
+        lines.append(f"\n[cyan]{hint}[/cyan]")
+
+    panel_text = "\n".join(lines)
+    console.print(Panel(panel_text, title="[bold]Platform Project[/bold]", border_style="blue"))
+    console.print()
+    return True
+
+
 @main.command('status')
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
 @click.option('--sftp-username', required=False, help='SFTP username (defaults to config).')
 @click.option('--sftp-key', type=click.Path(exists=True, dir_okay=False), help='Path to SFTP private key file (defaults to config).', default=None, show_default=False)
-def status(sftp_host, sftp_username, sftp_key):
-    """Show all projects and outputs for the user on the SFTP server."""
+@click.option('--json', 'json_output', is_flag=True, help='Output platform project as JSON.')
+@click.option('--all', 'show_all', is_flag=True, help='List all platform projects.')
+def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
+    """Show project status (platform pipeline + SFTP)."""
     config = load_user_config()
+
+    if json_output:
+        platform_id = _load_project_platform_id(os.getcwd())
+        if platform_id and config.get('api_key'):
+            data = _api_get(f"/projects/{platform_id}")
+            console.print_json(json.dumps(data))
+        else:
+            console.print("[yellow]Not linked to a platform project or not logged in.[/yellow]")
+        return
+
+    if show_all:
+        if not config.get('api_key'):
+            console.print("[yellow]Not logged in.[/yellow] Run [bold]cf login[/bold] to authenticate.")
+        else:
+            projects = _api_get("/projects/me")
+            if not projects:
+                console.print("[yellow]No platform projects found.[/yellow]")
+            else:
+                table = Table(title="Platform Projects")
+                table.add_column("Name", style="cyan")
+                table.add_column("Shuttle", style="yellow")
+                table.add_column("Status", style="green")
+                table.add_column("Updated", style="dim")
+                for p in projects:
+                    s_color = STATUS_COLORS.get(p.get('status', ''), 'white')
+                    table.add_row(
+                        p.get('name', ''),
+                        p.get('shuttle_name', '—'),
+                        f"[{s_color}]{p.get('status', '')}[/{s_color}]",
+                        (p.get('updated_at') or '')[:10],
+                    )
+                console.print(table)
+        console.print()
+
+    shown = _show_platform_status(os.getcwd())
+    if not shown and not show_all:
+        platform_id = _load_project_platform_id(os.getcwd())
+        if not platform_id:
+            console.print("[dim]Tip: Run [bold]cf link[/bold] to connect this project to the platform.[/dim]\n")
     if not sftp_username:
         sftp_username = config.get("sftp_username")
         if not sftp_username:
@@ -3360,11 +3535,191 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
 
 
 DEFAULT_API_URL = 'https://api.chipfoundry.io'
+PORTAL_BASE_URL = 'https://platform.chipfoundry.io'
 
 
 def _get_api_url() -> str:
     config = load_user_config()
     return config.get('api_url', DEFAULT_API_URL)
+
+
+def _get_portal_url() -> str:
+    api_url = _get_api_url()
+    if 'dev-api' in api_url:
+        return 'https://dev-platform.chipfoundry.io'
+    return PORTAL_BASE_URL
+
+
+def _api_client():
+    """Return an httpx client configured with API key auth. Returns (client, api_url) or raises SystemExit."""
+    import httpx
+
+    config = load_user_config()
+    api_key = config.get('api_key')
+    if not api_key:
+        console.print("[yellow]Not logged in.[/yellow] Run [bold]cf login[/bold] to authenticate.")
+        raise SystemExit(1)
+
+    api_url = _get_api_url()
+    client = httpx.Client(
+        base_url=f"{api_url}/api/v1",
+        headers={'Authorization': f'Bearer {api_key}'},
+        timeout=15,
+    )
+    return client, api_url
+
+
+def _api_get(path: str):
+    """Authenticated GET to the platform API. Returns parsed JSON or raises SystemExit."""
+    client, _ = _api_client()
+    try:
+        resp = client.get(path)
+        if resp.status_code == 401:
+            console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
+            raise SystemExit(1)
+        resp.raise_for_status()
+        return resp.json()
+    except SystemExit:
+        raise
+    except Exception as e:
+        console.print(f"[red]✗ API request failed: {e}[/red]")
+        raise SystemExit(1)
+    finally:
+        client.close()
+
+
+def _api_post(path: str, json_data: dict):
+    """Authenticated POST to the platform API. Returns parsed JSON or raises SystemExit."""
+    client, _ = _api_client()
+    try:
+        resp = client.post(path, json=json_data)
+        if resp.status_code == 401:
+            console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
+            raise SystemExit(1)
+        resp.raise_for_status()
+        return resp.json()
+    except SystemExit:
+        raise
+    except Exception as e:
+        console.print(f"[red]✗ API request failed: {e}[/red]")
+        raise SystemExit(1)
+    finally:
+        client.close()
+
+
+def _load_project_platform_id(project_root: str):
+    """Read platform_project_id from .cf/project.json, return None if absent."""
+    pj = Path(project_root) / '.cf' / 'project.json'
+    if not pj.exists():
+        return None
+    with open(pj) as f:
+        data = json.load(f)
+    return data.get('project', {}).get('platform_project_id')
+
+
+def _save_platform_id(project_root: str, platform_id: str):
+    """Write platform_project_id into .cf/project.json."""
+    pj = Path(project_root) / '.cf' / 'project.json'
+    with open(pj) as f:
+        data = json.load(f)
+    data.setdefault('project', {})['platform_project_id'] = platform_id
+    with open(pj, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+@main.command('link')
+@click.option('--id', 'project_id', default=None, help='Platform project UUID to link directly.')
+@click.option('--name', 'project_name', default=None, help='Platform project name to search for.')
+def link_cmd(project_id, project_name):
+    """Link this local project to an existing platform project."""
+    project_root = os.getcwd()
+    pj_path = Path(project_root) / '.cf' / 'project.json'
+    if not pj_path.exists():
+        console.print("[yellow]No .cf/project.json found. Run [bold]cf init[/bold] first, or this command will create one.[/yellow]")
+        create = console.input("Create a minimal project.json? (y/N): ").strip().lower()
+        if create != 'y':
+            return
+        config = load_user_config()
+        username = config.get("sftp_username", "unknown")
+        pj_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {"project": {"name": Path(project_root).name, "type": "", "user": username, "version": "1", "user_project_wrapper_hash": "", "submission_state": "Draft"}}
+        with open(pj_path, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    existing_id = _load_project_platform_id(project_root)
+    if existing_id:
+        overwrite = console.input(f"[yellow]Already linked to {existing_id}. Replace? (y/N): [/yellow]").strip().lower()
+        if overwrite != 'y':
+            return
+
+    if project_id:
+        project = _api_get(f"/projects/{project_id}")
+        _save_platform_id(project_root, project['id'])
+        portal_url = _get_portal_url()
+        console.print(f"[green]✓ Linked to {project['name']}[/green] ({project['id']})")
+        console.print(f"  Portal: {portal_url}/projects/{project['id']}")
+        return
+
+    projects = _api_get("/projects/me")
+    if not projects:
+        console.print("[yellow]No projects found on the platform.[/yellow] Create one with [bold]cf init[/bold].")
+        return
+
+    if project_name:
+        matches = [p for p in projects if project_name.lower() in p['name'].lower()]
+        if not matches:
+            console.print(f"[red]No projects matching '{project_name}' found.[/red]")
+            return
+        if len(matches) == 1:
+            _save_platform_id(project_root, matches[0]['id'])
+            portal_url = _get_portal_url()
+            console.print(f"[green]✓ Linked to {matches[0]['name']}[/green] ({matches[0]['id']})")
+            console.print(f"  Portal: {portal_url}/projects/{matches[0]['id']}")
+            return
+        projects = matches
+
+    console.print("\n[bold]Your platform projects:[/bold]")
+    for i, p in enumerate(projects, 1):
+        status_str = p.get('status', 'unknown')
+        shuttle_str = f" — {p.get('shuttle_name', '')}" if p.get('shuttle_name') else ""
+        console.print(f"  [cyan]{i}[/cyan]. {p['name']}{shuttle_str} [{status_str}]")
+
+    choice = console.input("\nSelect project number: ").strip()
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(projects):
+            selected = projects[idx]
+            _save_platform_id(project_root, selected['id'])
+            portal_url = _get_portal_url()
+            console.print(f"\n[green]✓ Linked to {selected['name']}[/green] ({selected['id']})")
+            console.print(f"  Portal: {portal_url}/projects/{selected['id']}")
+        else:
+            console.print("[red]Invalid selection.[/red]")
+    except ValueError:
+        console.print("[red]Invalid selection.[/red]")
+
+
+@main.command('unlink')
+def unlink_cmd():
+    """Remove the platform link from this project."""
+    project_root = os.getcwd()
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id:
+        console.print("[yellow]This project is not linked to the platform.[/yellow]")
+        return
+
+    confirm = console.input(f"Unlink from platform project {platform_id}? (y/N): ").strip().lower()
+    if confirm != 'y':
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    pj_path = Path(project_root) / '.cf' / 'project.json'
+    with open(pj_path) as f:
+        data = json.load(f)
+    data.get('project', {}).pop('platform_project_id', None)
+    with open(pj_path, 'w') as f:
+        json.dump(data, f, indent=2)
+    console.print("[green]✓ Platform link removed.[/green] The remote project is not deleted.")
 
 
 @main.command('login')
