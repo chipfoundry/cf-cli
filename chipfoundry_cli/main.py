@@ -1441,7 +1441,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
             with open(project_json_path, "r") as f:
                 pj = _json.load(f)
             try:
-                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj})
+                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "push"})
                 console.print("[green]✓ Platform project synced[/green]")
             except SystemExit:
                 console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
@@ -1568,7 +1568,7 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
                 import json as _json
                 with open(local_pj, "r") as f:
                     pj = _json.load(f)
-                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj})
+                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "pull"})
                 console.print("[green]✓ Platform project synced[/green]")
             except (SystemExit, Exception):
                 pass
