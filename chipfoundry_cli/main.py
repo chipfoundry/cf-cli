@@ -1449,7 +1449,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
 
             if sync_payload:
                 try:
-                    _api_put(f"/api/v1/projects/{platform_id}", sync_payload)
+                    _api_put(f"/projects/{platform_id}", sync_payload)
                     console.print("[green]✓ Platform project synced[/green]")
                 except SystemExit:
                     console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
@@ -1458,7 +1458,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
 
         if submit:
             try:
-                _api_post(f"/api/v1/projects/{platform_id}/submit", {})
+                _api_post(f"/projects/{platform_id}/submit", {})
                 console.print("[green]✓ Project submitted for review[/green]")
             except SystemExit:
                 console.print("[yellow]⚠ Submit failed — ensure the project has a name and description[/yellow]")
@@ -2120,7 +2120,7 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
 
     if platform_id and api_key:
         try:
-            _api_post(f"/api/v1/projects/{platform_id}/confirm", {"confirmation_acknowledged": True})
+            _api_post(f"/projects/{platform_id}/confirm", {"confirmation_acknowledged": True})
             console.print("[green]✓ Platform project confirmed[/green]")
         except SystemExit:
             console.print("[yellow]⚠ SFTP confirm succeeded but platform confirm failed — project may need APPROVED status first[/yellow]")
