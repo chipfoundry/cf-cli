@@ -1440,19 +1440,11 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
             import json as _json
             with open(project_json_path, "r") as f:
                 pj = _json.load(f)
-            proj = pj.get("project", {})
-            sync_payload = {}
-            if proj.get("user_project_wrapper_hash"):
-                sync_payload["gds_hash"] = proj["user_project_wrapper_hash"]
-            if proj.get("version"):
-                sync_payload["cli_project_version"] = proj["version"]
-
-            if sync_payload:
-                try:
-                    _api_put(f"/projects/{platform_id}", sync_payload)
-                    console.print("[green]✓ Platform project synced[/green]")
-                except SystemExit:
-                    console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
+            try:
+                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj})
+                console.print("[green]✓ Platform project synced[/green]")
+            except SystemExit:
+                console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
         except Exception:
             console.print("[yellow]⚠ Could not read project.json for platform sync[/yellow]")
 
