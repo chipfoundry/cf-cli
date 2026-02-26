@@ -411,6 +411,56 @@ def save_user_config(config: dict):
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, 'w') as f:
         toml.dump(config, f)
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass
+
+
+DEFAULT_API_URL = "https://platform.chipfoundry.io"
+
+
+def get_api_key() -> Optional[str]:
+    """Read the API key from config.toml, or None if absent."""
+    return load_user_config().get("api_key")
+
+
+def get_api_url() -> str:
+    """Read the API base URL from config.toml, with a sensible default."""
+    return load_user_config().get("api_url", DEFAULT_API_URL)
+
+
+def get_platform_project_id(project_root: str) -> Optional[str]:
+    """Read platform_project_id from .cf/project.json, or None if absent."""
+    project_json_path = Path(project_root) / ".cf" / "project.json"
+    if not project_json_path.exists():
+        return None
+    data = load_project_json(str(project_json_path))
+    return data.get("project", {}).get("platform_project_id")
+
+
+def set_platform_project_id(project_root: str, project_id: str):
+    """Write platform_project_id into .cf/project.json, preserving all existing fields."""
+    project_json_path = str(Path(project_root) / ".cf" / "project.json")
+    if Path(project_json_path).exists():
+        data = load_project_json(project_json_path)
+    else:
+        data = {"project": {}}
+    if "project" not in data:
+        data["project"] = {}
+    data["project"]["platform_project_id"] = project_id
+    save_project_json(project_json_path, data)
+
+
+def remove_platform_project_id(project_root: str):
+    """Remove platform_project_id from .cf/project.json."""
+    project_json_path = str(Path(project_root) / ".cf" / "project.json")
+    if not Path(project_json_path).exists():
+        return
+    data = load_project_json(project_json_path)
+    if "project" in data and "platform_project_id" in data["project"]:
+        del data["project"]["platform_project_id"]
+        save_project_json(project_json_path, data)
 
 def open_html_in_browser(html_path: str):
     """
