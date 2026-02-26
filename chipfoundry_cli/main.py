@@ -1284,7 +1284,8 @@ def gpio_config(project_root, view):
 @click.option('--project-type', help='Project type (auto-detected if not provided).', default=None)
 @click.option('--force-overwrite', is_flag=True, help='Overwrite existing files on SFTP without prompting.')
 @click.option('--dry-run', is_flag=True, help='Preview actions without uploading files.')
-def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_name, project_type, force_overwrite, dry_run):
+@click.option('--submit', is_flag=True, help='Submit the project for review after upload.')
+def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_name, project_type, force_overwrite, dry_run, submit):
     """Upload your project files to the ChipFoundry SFTP server."""
     # If .cf/project.json exists in cwd, use it as default project_root and project_name
     cwd_root, cwd_project_name = get_project_json_from_cwd()
@@ -1429,6 +1430,41 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
             sftp.close()
             transport.close()
 
+    # --- Platform sync ---
+    platform_id = _load_project_platform_id(project_root or ".")
+    config = load_user_config()
+    api_key = config.get("api_key")
+
+    if platform_id and api_key:
+        # Read gds_hash and version from the project.json we just wrote
+        try:
+            import json as _json
+            with open(project_json_path, "r") as f:
+                pj = _json.load(f)
+            sync_payload = {}
+            if pj.get("gds_hash"):
+                sync_payload["gds_hash"] = pj["gds_hash"]
+            if pj.get("cli_project_version"):
+                sync_payload["cli_project_version"] = pj["cli_project_version"]
+
+            if sync_payload:
+                try:
+                    _api_put(f"/api/v1/projects/{platform_id}", sync_payload)
+                    console.print("[green]✓ Platform project synced[/green]")
+                except SystemExit:
+                    console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
+        except Exception:
+            console.print("[yellow]⚠ Could not read project.json for platform sync[/yellow]")
+
+        if submit:
+            try:
+                _api_post(f"/api/v1/projects/{platform_id}/submit", {})
+                console.print("[green]✓ Project submitted for review[/green]")
+            except SystemExit:
+                console.print("[yellow]⚠ Submit failed — ensure the project has a name and description[/yellow]")
+    elif submit:
+        console.print("[yellow]⚠ --submit requires a linked platform project and active login[/yellow]")
+
 @main.command('pull')
 @click.option('--project-name', required=False, help='Project name to pull results for (defaults to value in .cf/project.json if present).')
 @click.option('--output-dir', required=False, type=click.Path(file_okay=False), help='(Ignored) Local directory to save results (now always sftp-output/<project_name>).')
@@ -1526,6 +1562,28 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
             sftp.close()
             transport.close()
             console.print(f"[dim]Disconnected from {sftp_host}[/dim]")
+
+    # --- Show platform review notes ---
+    platform_id = _load_project_platform_id(".")
+    pull_config = load_user_config()
+    api_key = pull_config.get("api_key")
+
+    if platform_id and api_key:
+        try:
+            project = _api_get(f"/projects/{platform_id}")
+            status = project.get("status", "")
+            notes = project.get("admin_review_notes")
+            if notes:
+                from rich.panel import Panel
+                style = "bold red" if status == "CHANGES_REQUESTED" else "yellow"
+                console.print()
+                console.print(Panel(
+                    notes,
+                    title="Review Notes" if status != "CHANGES_REQUESTED" else "Changes Requested",
+                    border_style=style,
+                ))
+        except SystemExit:
+            pass
 
 STATUS_COLORS = {
     "DRAFT": "dim",
@@ -2054,6 +2112,20 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
         if transport:
             sftp.close()
             transport.close()
+
+    # --- Platform confirm ---
+    platform_id = _load_project_platform_id(project_root or ".")
+    confirm_config = load_user_config()
+    api_key = confirm_config.get("api_key")
+
+    if platform_id and api_key:
+        try:
+            _api_post(f"/api/v1/projects/{platform_id}/confirm", {"confirmation_acknowledged": True})
+            console.print("[green]✓ Platform project confirmed[/green]")
+        except SystemExit:
+            console.print("[yellow]⚠ SFTP confirm succeeded but platform confirm failed — project may need APPROVED status first[/yellow]")
+    elif platform_id:
+        console.print("[dim]Tip: Run [bold]cf login[/bold] to sync confirmations with the platform[/dim]")
 
 @main.command('setup')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
@@ -3592,6 +3664,25 @@ def _api_post(path: str, json_data: dict):
     client, _ = _api_client()
     try:
         resp = client.post(path, json=json_data)
+        if resp.status_code == 401:
+            console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
+            raise SystemExit(1)
+        resp.raise_for_status()
+        return resp.json()
+    except SystemExit:
+        raise
+    except Exception as e:
+        console.print(f"[red]✗ API request failed: {e}[/red]")
+        raise SystemExit(1)
+    finally:
+        client.close()
+
+
+def _api_put(path: str, json_data: dict):
+    """Authenticated PUT to the platform API. Returns parsed JSON or raises SystemExit."""
+    client, _ = _api_client()
+    try:
+        resp = client.put(path, json=json_data)
         if resp.status_code == 401:
             console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
             raise SystemExit(1)
