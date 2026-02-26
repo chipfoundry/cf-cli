@@ -360,6 +360,7 @@ def init(project_root, shuttle, description):
             try:
                 shuttles = _api_get("/shuttles/available")
                 if shuttles:
+                    shuttles.sort(key=lambda s: s.get('tapeout_date', '9999-12-31'))
                     console.print("\n[bold]Available shuttles:[/bold]")
                     for i, s in enumerate(shuttles, 1):
                         deadline = s.get('tapeout_date', '')
