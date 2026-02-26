@@ -1571,11 +1571,10 @@ def _show_platform_status(project_root: str):
     lines.append(f"[bold]Status:[/bold]  [{color}]{status_val}[/{color}]")
     if project.get('shuttle_name'):
         deadline = ""
-        milestones = project.get('shuttle_milestones', [])
-        for m in milestones:
-            if m.get('label') == 'Tapeout':
-                deadline = f" (deadline: {m.get('date', 'TBD')})"
-                break
+        milestones = project.get('shuttle_milestones') or {}
+        tapeout = milestones.get('tapeout') if isinstance(milestones, dict) else None
+        if tapeout and isinstance(tapeout, dict):
+            deadline = f" (deadline: {tapeout.get('milestone_date', 'TBD')})"
         lines.append(f"[bold]Shuttle:[/bold] {project['shuttle_name']}{deadline}")
     if project.get('design_type'):
         lines.append(f"[bold]Type:[/bold]    {project['design_type']}")
