@@ -1296,8 +1296,21 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
     if not project_root:
         console.print("[bold red]No project root specified and no .cf/project.json found in current directory. Please provide --project-root.[/bold red]")
         raise click.Abort()
+
+    # Require platform link and login before pushing
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id:
+        console.print("[bold red]Project is not linked to the platform.[/bold red]")
+        console.print("Run [bold]cf link[/bold] to connect this project, or [bold]cf init[/bold] to create a new one.")
+        raise click.Abort()
+
     # Load user config for defaults
     config = load_user_config()
+    api_key = config.get("api_key")
+    if not api_key:
+        console.print("[bold red]Not logged in.[/bold red]")
+        console.print("Run [bold]cf login[/bold] to authenticate before pushing.")
+        raise click.Abort()
     if not sftp_username:
         sftp_username = config.get("sftp_username")
         if not sftp_username:
@@ -1430,32 +1443,25 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
             sftp.close()
             transport.close()
 
-    # --- Platform sync ---
-    platform_id = _load_project_platform_id(project_root or ".")
-    config = load_user_config()
-    api_key = config.get("api_key")
-
-    if platform_id and api_key:
+    # --- Platform sync (platform_id and api_key verified at top of push) ---
+    try:
+        import json as _json
+        with open(project_json_path, "r") as f:
+            pj = _json.load(f)
         try:
-            import json as _json
-            with open(project_json_path, "r") as f:
-                pj = _json.load(f)
-            try:
-                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "push"})
-                console.print("[green]✓ Platform project synced[/green]")
-            except SystemExit:
-                console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
-        except Exception:
-            console.print("[yellow]⚠ Could not read project.json for platform sync[/yellow]")
+            _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "push"})
+            console.print("[green]✓ Platform project synced[/green]")
+        except SystemExit:
+            console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
+    except Exception:
+        console.print("[yellow]⚠ Could not read project.json for platform sync[/yellow]")
 
-        if submit:
-            try:
-                _api_post(f"/projects/{platform_id}/submit", {})
-                console.print("[green]✓ Project submitted for review[/green]")
-            except SystemExit:
-                console.print("[yellow]⚠ Submit failed — ensure the project has a name and description[/yellow]")
-    elif submit:
-        console.print("[yellow]⚠ --submit requires a linked platform project and active login[/yellow]")
+    if submit:
+        try:
+            _api_post(f"/projects/{platform_id}/submit", {})
+            console.print("[green]✓ Project submitted for review[/green]")
+        except SystemExit:
+            console.print("[yellow]⚠ Submit failed — ensure the project has a name[/yellow]")
 
 @main.command('pull')
 @click.option('--project-name', required=False, help='Project name to pull results for (defaults to value in .cf/project.json if present).')
@@ -1472,9 +1478,21 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
     if not project_name:
         console.print("[bold red]No project name specified and no .cf/project.json found in current directory. Please provide --project-name.[/bold red]")
         raise click.Abort()
-    
+
+    # Require platform link and login before pulling
+    platform_id = _load_project_platform_id(".")
+    if not platform_id:
+        console.print("[bold red]Project is not linked to the platform.[/bold red]")
+        console.print("Run [bold]cf link[/bold] to connect this project, or [bold]cf init[/bold] to create a new one.")
+        raise click.Abort()
+
     # Load user config for defaults
     config = load_user_config()
+    api_key = config.get("api_key")
+    if not api_key:
+        console.print("[bold red]Not logged in.[/bold red]")
+        console.print("Run [bold]cf login[/bold] to authenticate before pulling.")
+        raise click.Abort()
     if not sftp_username:
         sftp_username = config.get("sftp_username")
         if not sftp_username:
@@ -1530,15 +1548,29 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
             sftp_download_recursive(sftp, remote_dir, output_dir, console=console)
             console.print(f"[green]✓ All files downloaded to {output_dir}[/green]")
             
-            # Automatically update local project config if available
+            # Merge pulled project config into local .cf/project.json, preserving platform_project_id
             pulled_config_path = os.path.join(output_dir, "config", "project.json")
             if os.path.exists(pulled_config_path):
                 local_config_path = os.path.join(".cf", "project.json")
                 os.makedirs(".cf", exist_ok=True)
-                
+
                 try:
-                    import shutil
-                    shutil.copy2(pulled_config_path, local_config_path)
+                    import json as _json
+                    pulled_data = _json.loads(open(pulled_config_path).read())
+
+                    existing_data = {}
+                    if os.path.exists(local_config_path):
+                        existing_data = _json.loads(open(local_config_path).read())
+
+                    saved_platform_id = existing_data.get("project", {}).get("platform_project_id")
+
+                    merged = pulled_data
+                    if saved_platform_id:
+                        merged.setdefault("project", {})["platform_project_id"] = saved_platform_id
+
+                    with open(local_config_path, "w") as f:
+                        _json.dump(merged, f, indent=2)
+
                     console.print(f"[green]✓ Project config automatically updated[/green]")
                 except Exception as e:
                     console.print(f"[yellow]Warning: Failed to update project config: {e}[/yellow]")
@@ -1555,39 +1587,35 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
             transport.close()
             console.print(f"[dim]Disconnected from {sftp_host}[/dim]")
 
-    # --- Platform sync and review notes ---
-    platform_id = _load_project_platform_id(".")
-    pull_config = load_user_config()
-    api_key = pull_config.get("api_key")
-
-    if platform_id and api_key:
-        # Sync local project.json to platform
-        local_pj = os.path.join(".", ".cf", "project.json")
-        if os.path.exists(local_pj):
-            try:
-                import json as _json
-                with open(local_pj, "r") as f:
-                    pj = _json.load(f)
-                _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "pull"})
-                console.print("[green]✓ Platform project synced[/green]")
-            except (SystemExit, Exception):
-                pass
-
+    # --- Platform sync and review notes (platform_id and api_key verified at top of pull) ---
+    local_pj = os.path.join(".", ".cf", "project.json")
+    if os.path.exists(local_pj):
         try:
-            project = _api_get(f"/projects/{platform_id}")
-            status = project.get("status", "")
-            notes = project.get("admin_review_notes")
-            if notes:
-                from rich.panel import Panel
-                style = "bold red" if status == "CHANGES_REQUESTED" else "yellow"
-                console.print()
-                console.print(Panel(
-                    notes,
-                    title="Review Notes" if status != "CHANGES_REQUESTED" else "Changes Requested",
-                    border_style=style,
-                ))
+            import json as _json
+            with open(local_pj, "r") as f:
+                pj = _json.load(f)
+            _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "pull"})
+            console.print("[green]✓ Platform project synced[/green]")
         except SystemExit:
-            pass
+            console.print("[yellow]⚠ SFTP download succeeded but platform sync failed[/yellow]")
+        except Exception:
+            console.print("[yellow]⚠ Could not read project.json for platform sync[/yellow]")
+
+    try:
+        project = _api_get(f"/projects/{platform_id}")
+        status = project.get("status", "")
+        notes = project.get("admin_review_notes")
+        if notes:
+            from rich.panel import Panel
+            style = "bold red" if status == "CHANGES_REQUESTED" else "yellow"
+            console.print()
+            console.print(Panel(
+                notes,
+                title="Review Notes" if status != "CHANGES_REQUESTED" else "Changes Requested",
+                border_style=style,
+            ))
+    except SystemExit:
+        pass
 
 STATUS_COLORS = {
     "DRAFT": "dim",
