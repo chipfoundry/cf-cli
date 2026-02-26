@@ -3359,5 +3359,132 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         console.print(f"\n[red]✗[/red] Error: {e}")
 
 
+DEFAULT_API_URL = 'https://api.chipfoundry.io'
+
+
+def _get_api_url() -> str:
+    config = load_user_config()
+    return config.get('api_url', DEFAULT_API_URL)
+
+
+@main.command('login')
+def login_cmd():
+    """Authenticate with ChipFoundry platform via browser."""
+    import httpx
+    import webbrowser
+    import time
+
+    api_url = _get_api_url()
+    console.print("[bold cyan]ChipFoundry CLI Login[/bold cyan]")
+    console.print(f"Opening browser to authenticate with [bold]{api_url}[/bold]...\n")
+
+    try:
+        resp = httpx.post(f"{api_url}/api/v1/auth/cli/sessions", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPError as e:
+        console.print(f"[red]✗ Failed to create login session: {e}[/red]")
+        raise SystemExit(1)
+
+    session_id = data['session_id']
+    login_url = data['login_url']
+    expires_at = data['expires_at']
+
+    webbrowser.open(login_url)
+    console.print(f"If the browser didn't open, visit this URL:\n[link={login_url}]{login_url}[/link]\n")
+    console.print("Waiting for approval in browser...", style="dim")
+
+    poll_url = f"{api_url}/api/v1/auth/cli/sessions/{session_id}"
+    poll_interval = 2
+    max_polls = 150  # 5 minutes at 2s intervals
+
+    for _ in range(max_polls):
+        time.sleep(poll_interval)
+        try:
+            poll_resp = httpx.get(poll_url, timeout=10)
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json()
+        except httpx.HTTPError:
+            continue
+
+        status = poll_data.get('status')
+
+        if status == 'completed':
+            api_key = poll_data.get('api_key')
+            user_email = poll_data.get('user_email', '')
+            if not api_key:
+                console.print("[red]✗ Session completed but no API key returned.[/red]")
+                raise SystemExit(1)
+
+            config = load_user_config()
+            config['api_key'] = api_key
+            if user_email:
+                config['user_email'] = user_email
+            save_user_config(config)
+
+            console.print(f"\n[green]✓ Logged in as {user_email or 'authenticated user'}[/green]")
+            console.print(f"  API key saved to {get_config_path()}")
+            return
+
+        if status == 'expired':
+            console.print("\n[red]✗ Login session expired. Please try again.[/red]")
+            raise SystemExit(1)
+
+    console.print("\n[red]✗ Login timed out. Please try again.[/red]")
+    raise SystemExit(1)
+
+
+@main.command('logout')
+def logout_cmd():
+    """Remove stored API key and log out."""
+    config = load_user_config()
+    removed = False
+    for key in ('api_key', 'user_email'):
+        if key in config:
+            del config[key]
+            removed = True
+
+    if removed:
+        save_user_config(config)
+        console.print("[green]✓ Logged out. API key removed.[/green]")
+    else:
+        console.print("[yellow]Not currently logged in.[/yellow]")
+
+
+@main.command('whoami')
+def whoami_cmd():
+    """Show current authentication status."""
+    import httpx
+
+    config = load_user_config()
+    api_key = config.get('api_key')
+
+    if not api_key:
+        console.print("[yellow]Not logged in.[/yellow] Run [bold]cf login[/bold] to authenticate.")
+        raise SystemExit(1)
+
+    api_url = _get_api_url()
+    try:
+        resp = httpx.get(
+            f"{api_url}/api/v1/auth/cli/whoami",
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=10,
+        )
+        if resp.status_code == 401:
+            console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
+            raise SystemExit(1)
+        resp.raise_for_status()
+        user = resp.json()
+        email = user.get('email', 'unknown')
+        name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or email
+        console.print(f"[green]✓ Logged in as {name}[/green] ({email})")
+    except httpx.HTTPError as e:
+        console.print(f"[red]✗ Could not verify credentials: {e}[/red]")
+        stored_email = config.get('user_email')
+        if stored_email:
+            console.print(f"  Last known user: {stored_email}")
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
-    main() 
+    main()
