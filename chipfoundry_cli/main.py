@@ -363,7 +363,7 @@ def init(project_root, shuttle, description):
                     console.print("\n[bold]Available shuttles:[/bold]")
                     for i, s in enumerate(shuttles, 1):
                         deadline = s.get('tapeout_date', '')
-                        console.print(f"  [cyan]{i}[/cyan]. {s['name']} ({s.get('process_node', '')}){f' — deadline {deadline}' if deadline else ''}")
+                        console.print(f"  [cyan]{i}[/cyan]. {s['name']}{f' — submission deadline {deadline}' if deadline else ''}")
                     console.print(f"  [cyan]{len(shuttles) + 1}[/cyan]. Skip — choose later")
                     choice = console.input("\nSelect shuttle: ").strip()
                     try:
