@@ -2774,13 +2774,18 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     )
                     console.print("[green]✓[/green] Precheck cloned successfully")
                 
-                console.print("[cyan]Pulling precheck Docker image...[/cyan]")
-                subprocess.run(
-                    ['docker', 'pull', 'chipfoundry/mpw_precheck:latest'],
-                    check=True,
-                    capture_output=True
-                )
-                console.print("[green]✓[/green] Precheck Docker image ready")
+                if shutil.which('docker') is None:
+                    had_errors = True
+                    console.print("[red]✗[/red] Docker not found. Install Docker Desktop to pull the precheck image.")
+                    console.print("[dim]Precheck repo cloned, but Docker image was not pulled.[/dim]")
+                else:
+                    console.print("[cyan]Pulling precheck Docker image...[/cyan]")
+                    subprocess.run(
+                        ['docker', 'pull', 'chipfoundry/mpw_precheck:latest'],
+                        check=True,
+                        capture_output=True
+                    )
+                    console.print("[green]✓[/green] Precheck Docker image ready")
                 
             except subprocess.CalledProcessError as e:
                 maybe_abort_no_space(e, "Precheck install")
@@ -2788,6 +2793,9 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                 console.print(f"[red]✗[/red] Failed to install precheck: {e}")
                 if e.stderr:
                     console.print(f"[dim]{e.stderr}[/dim]")
+            except OSError as e:
+                had_errors = True
+                console.print(f"[red]✗[/red] Failed to install precheck: {e}")
     
     # Summary
     console.print("\n" + "="*60)
