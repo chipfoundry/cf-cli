@@ -1669,6 +1669,13 @@ def _show_platform_status(project_root: str):
         lines.append(f"[bold]Shuttle:[/bold] {project['shuttle_name']}{deadline}")
     if project.get('design_type'):
         lines.append(f"[bold]Type:[/bold]    {project['design_type']}")
+    ts_val = project.get('tapeout_state')
+    if ts_val:
+        _tsl = {"imported": "Imported", "tapeout_running": "Tapeout Running", "tapeout_done": "Tapeout Done", "drc_running": "DRC Running", "drc_checks_clean": "DRC Clean", "drc_checks_done": "DRC Done", "drc_checks_waived": "DRC Waived", "exported": "Exported", "confirmed": "Confirmed"}
+        _tsc = {"imported": "dim", "tapeout_running": "blue bold", "tapeout_done": "cyan", "drc_running": "blue bold", "drc_checks_clean": "green", "drc_checks_done": "yellow", "drc_checks_waived": "yellow", "exported": "magenta", "confirmed": "green bold"}
+        tl = _tsl.get(ts_val, ts_val)
+        tc = _tsc.get(ts_val, "white")
+        lines.append(f"[bold]Tapeout:[/bold] [{tc}]{tl}[/{tc}]")
     if project.get('gds_hash'):
         lines.append(f"[bold]GDS Hash:[/bold] {project['gds_hash'][:16]}...")
     if project.get('updated_at'):
@@ -1718,13 +1725,21 @@ def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
                 table.add_column("Name", style="cyan")
                 table.add_column("Shuttle", style="yellow")
                 table.add_column("Status", style="green")
+                table.add_column("Tapeout")
                 table.add_column("Updated", style="dim")
+                _tsl = {"imported": "Imported", "tapeout_running": "Tapeout Running", "tapeout_done": "Tapeout Done", "drc_running": "DRC Running", "drc_checks_clean": "DRC Clean", "drc_checks_done": "DRC Done", "drc_checks_waived": "DRC Waived", "exported": "Exported", "confirmed": "Confirmed"}
+                _tsc = {"imported": "dim", "tapeout_running": "blue bold", "tapeout_done": "cyan", "drc_running": "blue bold", "drc_checks_clean": "green", "drc_checks_done": "yellow", "drc_checks_waived": "yellow", "exported": "magenta", "confirmed": "green bold"}
                 for p in projects:
                     s_color = STATUS_COLORS.get(p.get('status', ''), 'white')
+                    ts_raw = p.get('tapeout_state') or ''
+                    ts_label = _tsl.get(ts_raw, ts_raw)
+                    ts_color = _tsc.get(ts_raw, 'dim')
+                    ts_cell = f"[{ts_color}]{ts_label}[/{ts_color}]" if ts_raw else "—"
                     table.add_row(
                         p.get('name', ''),
                         p.get('shuttle_name', '—'),
                         f"[{s_color}]{p.get('status', '')}[/{s_color}]",
+                        ts_cell,
                         (p.get('updated_at') or '')[:10],
                     )
                 console.print(table)
