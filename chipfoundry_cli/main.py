@@ -3740,12 +3740,18 @@ def _load_project_platform_id(project_root: str):
     return data.get('project', {}).get('platform_project_id')
 
 
-def _save_platform_id(project_root: str, platform_id: str):
-    """Write platform_project_id into .cf/project.json."""
+def _save_platform_id(project_root: str, platform_id: str, project_name: str = None):
+    """Write platform_project_id (and optionally project name) into .cf/project.json."""
     pj = Path(project_root) / '.cf' / 'project.json'
     with open(pj) as f:
         data = json.load(f)
-    data.setdefault('project', {})['platform_project_id'] = platform_id
+    proj = data.setdefault('project', {})
+    proj['platform_project_id'] = platform_id
+    if project_name:
+        old_name = proj.get('name')
+        proj['name'] = project_name
+        if old_name and old_name != project_name:
+            console.print(f"[yellow]Updated project name: '{old_name}' → '{project_name}' (synced from platform)[/yellow]")
     with open(pj, 'w') as f:
         json.dump(data, f, indent=2)
 
@@ -3777,7 +3783,7 @@ def link_cmd(project_id, project_name):
 
     if project_id:
         project = _api_get(f"/projects/{project_id}")
-        _save_platform_id(project_root, project['id'])
+        _save_platform_id(project_root, project['id'], project['name'])
         portal_url = _get_portal_url()
         console.print(f"[green]✓ Linked to {project['name']}[/green] ({project['id']})")
         console.print(f"  Portal: {portal_url}/projects/{project['id']}")
@@ -3794,7 +3800,7 @@ def link_cmd(project_id, project_name):
             console.print(f"[red]No projects matching '{project_name}' found.[/red]")
             return
         if len(matches) == 1:
-            _save_platform_id(project_root, matches[0]['id'])
+            _save_platform_id(project_root, matches[0]['id'], matches[0]['name'])
             portal_url = _get_portal_url()
             console.print(f"[green]✓ Linked to {matches[0]['name']}[/green] ({matches[0]['id']})")
             console.print(f"  Portal: {portal_url}/projects/{matches[0]['id']}")
@@ -3812,7 +3818,7 @@ def link_cmd(project_id, project_name):
         idx = int(choice) - 1
         if 0 <= idx < len(projects):
             selected = projects[idx]
-            _save_platform_id(project_root, selected['id'])
+            _save_platform_id(project_root, selected['id'], selected['name'])
             portal_url = _get_portal_url()
             console.print(f"\n[green]✓ Linked to {selected['name']}[/green] ({selected['id']})")
             console.print(f"  Portal: {portal_url}/projects/{selected['id']}")
