@@ -1450,7 +1450,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         with open(project_json_path, "r") as f:
             pj = _json.load(f)
         try:
-            _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "push"})
+            _api_put(f"/projects/{platform_id}", {"cli_project_json": _slim_project_json(pj), "cli_sync_source": "push"})
             console.print("[green]✓ Platform project synced[/green]")
         except SystemExit:
             console.print("[yellow]⚠ SFTP upload succeeded but platform sync failed[/yellow]")
@@ -1595,7 +1595,7 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
             import json as _json
             with open(local_pj, "r") as f:
                 pj = _json.load(f)
-            _api_put(f"/projects/{platform_id}", {"cli_project_json": pj, "cli_sync_source": "pull"})
+            _api_put(f"/projects/{platform_id}", {"cli_project_json": _slim_project_json(pj), "cli_sync_source": "pull"})
             console.print("[green]✓ Platform project synced[/green]")
         except SystemExit:
             console.print("[yellow]⚠ SFTP download succeeded but platform sync failed[/yellow]")
@@ -3751,6 +3751,20 @@ def _api_put(path: str, json_data: dict):
         raise SystemExit(1)
     finally:
         client.close()
+
+
+_SYNC_KEEP_KEYS = {"project", "tapeout"}
+
+
+def _slim_project_json(pj: dict) -> dict:
+    """Return a lightweight copy of project.json for API sync.
+
+    The full file can exceed the 8 KB AWS WAF body-inspection limit when it
+    contains DRC results, report summaries, etc.  The backend only needs the
+    ``project`` and ``tapeout`` top-level sections; everything else is
+    stripped to keep the payload small.
+    """
+    return {k: v for k, v in pj.items() if k in _SYNC_KEEP_KEYS}
 
 
 def _load_project_platform_id(project_root: str):
