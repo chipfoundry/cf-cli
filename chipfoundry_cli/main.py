@@ -2763,24 +2763,30 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         step_num = 8 if not only_mode else ""
         console.print(f"\n[bold]Step {step_num}:[/bold] Installing precheck...")
         
-        if shutil.which('docker') is None:
-            had_errors = True
-            console.print("[red]✗[/red] Docker not found. Install Docker Desktop to pull the precheck image.")
-        elif dry_run:
-            console.print("[dim]Would pull chipfoundry/mpw_precheck:latest[/dim]")
+        if dry_run:
+            console.print("[dim]Would install/upgrade cf-precheck Python package[/dim]")
         else:
             try:
-                console.print("[cyan]Pulling precheck Docker image...[/cyan]")
+                console.print("[cyan]Installing cf-precheck...[/cyan]")
                 subprocess.run(
-                    ['docker', 'pull', 'chipfoundry/mpw_precheck:latest'],
+                    [sys.executable, '-m', 'pip', 'install', '--upgrade', '-q', 'cf-precheck'],
                     check=True,
-                    capture_output=True
+                    capture_output=True,
+                    text=True,
                 )
-                console.print("[green]✓[/green] Precheck Docker image ready")
+                try:
+                    result = subprocess.run(
+                        [sys.executable, '-c', 'from cf_precheck import __version__; print(__version__)'],
+                        capture_output=True, text=True,
+                    )
+                    version = result.stdout.strip()
+                    console.print(f"[green]✓[/green] cf-precheck v{version} installed")
+                except Exception:
+                    console.print("[green]✓[/green] cf-precheck installed")
             except subprocess.CalledProcessError as e:
                 maybe_abort_no_space(e, "Precheck install")
                 had_errors = True
-                console.print(f"[red]✗[/red] Failed to pull precheck image: {e}")
+                console.print(f"[red]✗[/red] Failed to install cf-precheck: {e}")
                 if e.stderr:
                     console.print(f"[dim]{e.stderr}[/dim]")
     
@@ -3252,30 +3258,27 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     
     pdk_path = pdk_root / pdk
     
-    precheck_args = [
+    docker_image = 'chipfoundry/mpw_precheck:latest'
+    
+    docker_cmd = [
+        'docker', 'run', '--rm',
+        '-v', f'{project_root_path}:{project_root_path}',
+        '-v', f'{pdk_root}:{pdk_root}',
+        docker_image,
+        'cf-precheck',
         '-i', str(project_root_path),
         '-p', str(pdk_path),
         '-c', '/opt/caravel',
     ]
     
     if magic_drc:
-        precheck_args.append('--magic-drc')
+        docker_cmd.append('--magic-drc')
     
     if skip_checks:
-        precheck_args.extend(['--skip-checks'] + list(skip_checks))
+        docker_cmd.extend(['--skip-checks'] + list(skip_checks))
     
     if checks:
-        precheck_args.extend(list(checks))
-    
-    precheck_cmd = 'pip3 install -q cf-precheck && cf-precheck ' + ' '.join(precheck_args)
-    
-    docker_cmd = [
-        'docker', 'run', '--rm',
-        '-v', f'{project_root_path}:{project_root_path}',
-        '-v', f'{pdk_root}:{pdk_root}',
-        'chipfoundry/mpw_precheck:latest',
-        'bash', '-c', precheck_cmd,
-    ]
+        docker_cmd.extend(list(checks))
     
     checks_display = ', '.join(checks) if checks else 'All checks'
     console.print("\n" + "="*60)
@@ -3293,6 +3296,26 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
         console.print("[bold yellow]Dry run - would execute:[/bold yellow]\n")
         console.print("[dim]" + ' '.join(docker_cmd) + "[/dim]")
         return
+    
+    # Pull/update Docker image before running
+    console.print(f"[cyan]Checking for Docker image updates...[/cyan]")
+    try:
+        subprocess.run(
+            ['docker', 'pull', docker_image],
+            check=True,
+            capture_output=True,
+        )
+        console.print(f"[green]✓[/green] Docker image up to date")
+    except subprocess.CalledProcessError:
+        # Image might already be available locally, warn but continue
+        result = subprocess.run(
+            ['docker', 'image', 'inspect', docker_image],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            console.print(f"[red]✗[/red] Docker image '{docker_image}' not found. Run 'cf setup --only-precheck' or check your connection.")
+            return
+        console.print("[yellow]⚠[/yellow] Could not check for image updates (using cached image)")
     
     console.print("[cyan]Running cf-precheck...[/cyan]\n")
     
