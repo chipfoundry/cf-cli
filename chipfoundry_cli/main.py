@@ -3275,7 +3275,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     if checks:
         precheck_args.extend(list(checks))
     
-    inner_cmd = 'pip3 install --upgrade -q cf-precheck && cf-precheck ' + ' '.join(precheck_args)
+    inner_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null && cf-precheck ' + ' '.join(precheck_args)
     
     docker_cmd = [
         'docker', 'run', '--rm',
