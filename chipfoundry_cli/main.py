@@ -2762,56 +2762,27 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     if install_precheck:
         step_num = 8 if not only_mode else ""
         console.print(f"\n[bold]Step {step_num}:[/bold] Installing precheck...")
-        precheck_dir = Path.home() / 'mpw_precheck'
         
-        # Check if already installed
-        is_installed = precheck_dir.exists() and (precheck_dir / '.git').exists()
-        
-        if is_installed and not overwrite:
-            console.print("[green]✓[/green] Precheck already installed")
+        if shutil.which('docker') is None:
+            had_errors = True
+            console.print("[red]✗[/red] Docker not found. Install Docker Desktop to pull the precheck image.")
         elif dry_run:
-            if is_installed:
-                console.print("[dim]Would reinstall mpw_precheck [--overwrite][/dim]")
-            else:
-                console.print("[dim]Would install mpw_precheck[/dim]")
+            console.print("[dim]Would pull chipfoundry/mpw_precheck:latest[/dim]")
         else:
             try:
-                if precheck_dir.exists() and overwrite:
-                    console.print(f"[cyan]Removing existing {precheck_dir}...[/cyan]")
-                    shutil.rmtree(precheck_dir)
-                
-                if not precheck_dir.exists():
-                    console.print("[cyan]Cloning mpw_precheck...[/cyan]")
-                    subprocess.run(
-                        ['git', 'clone', '--depth=1', 'https://github.com/chipfoundry/mpw_precheck.git', str(precheck_dir)],
-                        check=True,
-                        capture_output=True,
-                        text=True
-                    )
-                    console.print("[green]✓[/green] Precheck cloned successfully")
-                
-                if shutil.which('docker') is None:
-                    had_errors = True
-                    console.print("[red]✗[/red] Docker not found. Install Docker Desktop to pull the precheck image.")
-                    console.print("[dim]Precheck repo cloned, but Docker image was not pulled.[/dim]")
-                else:
-                    console.print("[cyan]Pulling precheck Docker image...[/cyan]")
-                    subprocess.run(
-                        ['docker', 'pull', 'chipfoundry/mpw_precheck:latest'],
-                        check=True,
-                        capture_output=True
-                    )
-                    console.print("[green]✓[/green] Precheck Docker image ready")
-                
+                console.print("[cyan]Pulling precheck Docker image...[/cyan]")
+                subprocess.run(
+                    ['docker', 'pull', 'chipfoundry/mpw_precheck:latest'],
+                    check=True,
+                    capture_output=True
+                )
+                console.print("[green]✓[/green] Precheck Docker image ready")
             except subprocess.CalledProcessError as e:
                 maybe_abort_no_space(e, "Precheck install")
                 had_errors = True
-                console.print(f"[red]✗[/red] Failed to install precheck: {e}")
+                console.print(f"[red]✗[/red] Failed to pull precheck image: {e}")
                 if e.stderr:
                     console.print(f"[dim]{e.stderr}[/dim]")
-            except OSError as e:
-                had_errors = True
-                console.print(f"[red]✗[/red] Failed to install precheck: {e}")
     
     # Summary
     console.print("\n" + "="*60)
@@ -3216,21 +3187,22 @@ def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
 
 @main.command('precheck')
 @click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
-@click.option('--disable-lvs', is_flag=True, help='Disable LVS check and run specific checks only')
+@click.option('--skip-checks', multiple=True, help='Checks to skip (can be specified multiple times)')
+@click.option('--magic-drc', is_flag=True, help='Include Magic DRC check (optional, off by default)')
 @click.option('--checks', multiple=True, help='Specific checks to run (can be specified multiple times)')
 @click.option('--dry-run', is_flag=True, help='Show the command without running')
-def precheck(project_root, disable_lvs, checks, dry_run):
-    """Run mpw_precheck validation on the project.
+def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
+    """Run precheck validation on the project.
     
-    This runs the MPW (Multi-Project Wafer) precheck tool to validate
-    your design before submission.
+    This runs the cf-precheck tool to validate your design before
+    submission.
     
     Examples:
-        cf precheck                     # Run all checks
-        cf precheck --disable-lvs       # Skip LVS, run specific checks
-        cf precheck --checks license --checks makefile  # Run specific checks
+        cf precheck                              # Run all checks
+        cf precheck --skip-checks lvs            # Skip LVS check
+        cf precheck --magic-drc                  # Include optional Magic DRC
+        cf precheck --checks topcell_check       # Run specific checks only
     """
-    # If .cf/project.json exists in cwd, use it as default project_root
     cwd_root, _ = get_project_json_from_cwd()
     if not project_root and cwd_root:
         project_root = cwd_root
@@ -3239,7 +3211,6 @@ def precheck(project_root, disable_lvs, checks, dry_run):
     
     project_root_path = Path(project_root)
     
-    # Check if project is initialized (allow graceful return)
     if not check_project_initialized(project_root_path, 'precheck', dry_run=dry_run, allow_graceful=True):
         console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
         console.print("[yellow]Dependencies are required before running precheck.[/yellow]")
@@ -3247,12 +3218,10 @@ def precheck(project_root, disable_lvs, checks, dry_run):
     
     project_json_path = project_root_path / '.cf' / 'project.json'
     
-    # Check project type - GPIO config not needed for openframe
     with open(project_json_path, 'r') as f:
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
     
-    # Check if GPIO configuration exists (not needed for openframe)
     if project_type != 'openframe':
         gpio_config = get_gpio_config_from_project_json(str(project_json_path))
         if not gpio_config or len(gpio_config) == 0:
@@ -3261,10 +3230,8 @@ def precheck(project_root, disable_lvs, checks, dry_run):
             console.print("[cyan]Please run 'cf gpio-config' to configure GPIO settings first.[/cyan]")
             raise click.Abort()
     
-    precheck_root = Path.home() / 'mpw_precheck'
     pdk_root = project_root_path / 'dependencies' / 'pdks'
     
-    # Detect PDK from project.json
     pdk = 'sky130A'
     if project_json_path.exists():
         try:
@@ -3274,124 +3241,79 @@ def precheck(project_root, disable_lvs, checks, dry_run):
         except:
             pass
     
-    # Check if precheck is installed
-    if not precheck_root.exists():
-        console.print(f"[red]✗[/red] mpw_precheck not found at {precheck_root}")
-        console.print("[yellow]Run 'cf setup --only-precheck' to install[/yellow]")
-        return
-    
-    # Check if PDK exists
     if not (pdk_root / pdk).exists():
         console.print(f"[red]✗[/red] PDK not found at {pdk_root / pdk}")
         console.print("[yellow]Run 'cf setup --only-pdk' to install[/yellow]")
         return
     
-    # Check Docker availability
-    docker_available = shutil.which('docker') is not None
-    if not docker_available:
+    if shutil.which('docker') is None:
         console.print("[red]✗[/red] Docker not found. Docker is required to run precheck.")
         return
     
-    # Build the checks list
-    if checks:
-        # User specified custom checks
-        checks_list = list(checks)
-    elif disable_lvs:
-        # Default checks when LVS is disabled
-        checks_list = [
-            'license', 'makefile', 'default', 'documentation', 'consistency',
-            'gpio_defines', 'xor', 'magic_drc', 'klayout_feol', 'klayout_beol',
-            'klayout_offgrid', 'klayout_met_min_ca_density',
-            'klayout_pin_label_purposes_overlapping_drawing', 'klayout_zeroarea'
-        ]
-    else:
-        # All checks (default behavior)
-        checks_list = []
-    
-    # Display configuration
-    console.print("\n" + "="*60)
-    console.print("[bold cyan]MPW Precheck[/bold cyan]")
-    console.print(f"Project: [yellow]{project_root_path}[/yellow]")
-    console.print(f"PDK: [yellow]{pdk}[/yellow]")
-    if disable_lvs:
-        console.print("Mode: [yellow]LVS disabled[/yellow]")
-    if checks_list:
-        console.print(f"Checks: [yellow]{', '.join(checks_list)}[/yellow]")
-    else:
-        console.print("Checks: [yellow]All checks[/yellow]")
-    console.print("="*60 + "\n")
-    
-    # Build Docker command
-    import getpass
-    import pwd
-    
+    pdk_path = pdk_root / pdk
     user_id = os.getuid()
     group_id = os.getgid()
     
-    pdk_path = pdk_root / pdk
-    pdkpath = pdk_path  # Same as PDK_PATH in the Makefile
-    ipm_dir = Path.home() / '.ipm'
-    
-    # Create .ipm directory if it doesn't exist
-    if not ipm_dir.exists():
-        ipm_dir.mkdir(parents=True, exist_ok=True)
-    
     docker_cmd = [
         'docker', 'run', '--rm',
-        '-v', f'{precheck_root}:{precheck_root}',
         '-v', f'{project_root_path}:{project_root_path}',
         '-v', f'{pdk_root}:{pdk_root}',
-        '-v', f'{ipm_dir}:{ipm_dir}',
-        '-e', f'INPUT_DIRECTORY={project_root_path}',
-        '-e', f'PDK_PATH={pdk_path}',
-        '-e', f'PDK_ROOT={pdk_root}',
-        '-e', f'PDKPATH={pdkpath}',
         '-u', f'{user_id}:{group_id}',
         'chipfoundry/mpw_precheck:latest',
-        'bash', '-c',
+        'cf-precheck',
+        '-i', str(project_root_path),
+        '-p', str(pdk_path),
+        '-c', '/opt/caravel',
     ]
     
-    # Build the precheck command
-    precheck_cmd = f'cd {precheck_root} ; python3 mpw_precheck.py --input_directory {project_root_path} --pdk_path {pdk_path}'
+    if magic_drc:
+        docker_cmd.append('--magic-drc')
     
-    if checks_list:
-        precheck_cmd += ' ' + ' '.join(checks_list)
+    if skip_checks:
+        docker_cmd.extend(['--skip-checks'] + list(skip_checks))
     
-    docker_cmd.append(precheck_cmd)
+    if checks:
+        docker_cmd.extend(list(checks))
+    
+    checks_display = ', '.join(checks) if checks else 'All checks'
+    console.print("\n" + "="*60)
+    console.print("[bold cyan]CF Precheck[/bold cyan]")
+    console.print(f"Project: [yellow]{project_root_path}[/yellow]")
+    console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    if skip_checks:
+        console.print(f"Skipping: [yellow]{', '.join(skip_checks)}[/yellow]")
+    if magic_drc:
+        console.print("Magic DRC: [yellow]enabled[/yellow]")
+    console.print(f"Checks: [yellow]{checks_display}[/yellow]")
+    console.print("="*60 + "\n")
     
     if dry_run:
         console.print("[bold yellow]Dry run - would execute:[/bold yellow]\n")
         console.print("[dim]" + ' '.join(docker_cmd) + "[/dim]")
         return
     
-    # Run precheck
-    console.print("[cyan]Running mpw_precheck...[/cyan]")
+    console.print("[cyan]Running cf-precheck...[/cyan]\n")
     
     try:
-        # Use Popen for better signal handling
         process = subprocess.Popen(
             docker_cmd,
-            cwd=str(precheck_root),
             preexec_fn=os.setsid if os.name != 'nt' else None
         )
         
-        # Wait for process to complete
         returncode = process.wait()
         
-        console.print("")  # Add newline
+        console.print("")
         if returncode == 0:
             console.print("[green]✓[/green] Precheck passed!")
-        elif returncode == -2 or returncode == 130:  # SIGINT
+        elif returncode == -2 or returncode == 130:
             console.print("[yellow]⚠[/yellow] Precheck interrupted by user")
             sys.exit(130)
         else:
-            console.print(f"[red]✗[/red] Precheck failed with exit code {returncode}")
-            console.print(f"[yellow]Check the output above for details[/yellow]")
+            console.print(f"[red]✗[/red] Precheck failed (exit code {returncode})")
             sys.exit(returncode)
             
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Precheck interrupted by user")
-        # Try to stop the Docker container gracefully
         try:
             if os.name != 'nt':
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
