@@ -29,9 +29,10 @@ class TestPrecheckCommand:
         result = runner.invoke(main, ['precheck', '--help'])
         
         assert result.exit_code == 0
-        assert 'Run mpw_precheck validation' in result.output
+        assert 'Run precheck validation' in result.output
         assert '--project-root' in result.output
-        assert '--disable-lvs' in result.output
+        assert '--skip-checks' in result.output
+        assert '--magic-drc' in result.output
         assert '--checks' in result.output
         assert '--dry-run' in result.output
     
@@ -44,24 +45,20 @@ class TestPrecheckCommand:
             '--dry-run'
         ])
         
-        # Command returns 0 even on error, just prints error message
         assert result.exit_code == 0
-        # May mention precheck, pdk, or setup in error message
         assert any(keyword in result.output.lower() for keyword in ['precheck', 'pdk', 'setup', 'dry'])
     
-    def test_precheck_disable_lvs(self, temp_project_dir):
-        """Test precheck command with --disable-lvs flag."""
+    def test_precheck_skip_checks(self, temp_project_dir):
+        """Test precheck command with --skip-checks flag."""
         runner = CliRunner()
         result = runner.invoke(main, [
             'precheck',
             '--project-root', temp_project_dir,
-            '--disable-lvs',
+            '--skip-checks', 'lvs',
             '--dry-run'
         ])
         
-        # Command returns 0 even on error, just prints error message
         assert result.exit_code == 0
-        # May mention precheck, pdk, or setup in error message
         assert any(keyword in result.output.lower() for keyword in ['precheck', 'pdk', 'setup', 'dry'])
     
     def test_precheck_with_checks(self, temp_project_dir):
@@ -70,14 +67,25 @@ class TestPrecheckCommand:
         result = runner.invoke(main, [
             'precheck',
             '--project-root', temp_project_dir,
-            '--checks', 'license',
-            '--checks', 'makefile',
+            '--checks', 'topcell_check',
+            '--checks', 'gpio_defines',
             '--dry-run'
         ])
         
-        # Command returns 0 even on error, just prints error message
         assert result.exit_code == 0
-        # May mention precheck, pdk, or setup in error message
+        assert any(keyword in result.output.lower() for keyword in ['precheck', 'pdk', 'setup', 'dry'])
+    
+    def test_precheck_magic_drc(self, temp_project_dir):
+        """Test precheck command with --magic-drc flag."""
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            'precheck',
+            '--project-root', temp_project_dir,
+            '--magic-drc',
+            '--dry-run'
+        ])
+        
+        assert result.exit_code == 0
         assert any(keyword in result.output.lower() for keyword in ['precheck', 'pdk', 'setup', 'dry'])
 
 
