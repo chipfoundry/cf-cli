@@ -3260,25 +3260,30 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     
     docker_image = 'chipfoundry/mpw_precheck:latest'
     
-    docker_cmd = [
-        'docker', 'run', '--rm',
-        '-v', f'{project_root_path}:{project_root_path}',
-        '-v', f'{pdk_root}:{pdk_root}',
-        docker_image,
-        'cf-precheck',
+    precheck_args = [
         '-i', str(project_root_path),
         '-p', str(pdk_path),
         '-c', '/opt/caravel',
     ]
     
     if magic_drc:
-        docker_cmd.append('--magic-drc')
+        precheck_args.append('--magic-drc')
     
     if skip_checks:
-        docker_cmd.extend(['--skip-checks'] + list(skip_checks))
+        precheck_args.extend(['--skip-checks'] + list(skip_checks))
     
     if checks:
-        docker_cmd.extend(list(checks))
+        precheck_args.extend(list(checks))
+    
+    inner_cmd = 'pip3 install --upgrade -q cf-precheck && cf-precheck ' + ' '.join(precheck_args)
+    
+    docker_cmd = [
+        'docker', 'run', '--rm',
+        '-v', f'{project_root_path}:{project_root_path}',
+        '-v', f'{pdk_root}:{pdk_root}',
+        docker_image,
+        'bash', '-c', inner_cmd,
+    ]
     
     checks_display = ', '.join(checks) if checks else 'All checks'
     console.print("\n" + "="*60)
