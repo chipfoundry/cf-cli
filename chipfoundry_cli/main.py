@@ -3275,10 +3275,10 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     if checks:
         precheck_args.extend(list(checks))
     
-    inner_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null && cf-precheck ' + ' '.join(precheck_args)
+    inner_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null && exec cf-precheck ' + ' '.join(precheck_args)
     
     docker_cmd = [
-        'docker', 'run', '--rm',
+        'docker', 'run', '--rm', '--init',
         '-v', f'{project_root_path}:{project_root_path}',
         '-v', f'{pdk_root}:{pdk_root}',
         '-e', f'PDK_ROOT={pdk_root}',
@@ -3328,11 +3328,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     console.print("[cyan]Running cf-precheck...[/cyan]\n")
     
     try:
-        process = subprocess.Popen(
-            docker_cmd,
-            preexec_fn=os.setsid if os.name != 'nt' else None
-        )
-        
+        process = subprocess.Popen(docker_cmd)
         returncode = process.wait()
         
         console.print("")
@@ -3348,17 +3344,11 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Precheck interrupted by user")
         try:
-            if os.name != 'nt':
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                process.wait(timeout=5)
-            else:
-                process.terminate()
-                process.wait(timeout=5)
-        except Exception:
-            if os.name != 'nt':
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            else:
-                process.kill()
+            process.terminate()
+            process.wait(timeout=10)
+        except (subprocess.TimeoutExpired, Exception):
+            process.kill()
+        sys.exit(130)
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error running precheck: {e}")
 
