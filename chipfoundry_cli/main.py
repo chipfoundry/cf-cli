@@ -3281,6 +3281,9 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
         'docker', 'run', '--rm',
         '-v', f'{project_root_path}:{project_root_path}',
         '-v', f'{pdk_root}:{pdk_root}',
+        '-e', f'PDK_ROOT={pdk_root}',
+        '-e', f'PDK_PATH={pdk_path}',
+        '-e', f'PDKPATH={pdk_path}',
         docker_image,
         'bash', '-c', inner_cmd,
     ]
