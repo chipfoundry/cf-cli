@@ -323,7 +323,16 @@ def init(project_root, shuttle, description):
     config = load_user_config()
     username = config.get("sftp_username")
     if not username:
-        console.print("[bold red]No SFTP username found in user config. Please run 'chipfoundry config' first.[/bold red]")
+        try:
+            me = _api_get("/auth/cli/whoami")
+            username = me.get("sftp_username")
+            if username:
+                config["sftp_username"] = username
+                save_user_config(config)
+        except SystemExit:
+            pass
+    if not username:
+        console.print("[bold red]No SFTP account linked to your platform account. Please run 'cf login' first.[/bold red]")
         raise click.Abort()
 
     gds_dir = Path(project_root) / 'gds'
@@ -1313,10 +1322,14 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         console.print("Run [bold]cf login[/bold] to authenticate before pushing.")
         raise click.Abort()
     if not sftp_username:
-        sftp_username = config.get("sftp_username")
+        me = _api_get("/auth/cli/whoami")
+        sftp_username = me.get("sftp_username")
         if not sftp_username:
-            console.print("[bold red]No SFTP username provided and not found in config. Please run 'chipfoundry init' or provide --sftp-username.[/bold red]")
+            console.print("[bold red]No SFTP account linked to your platform account.[/bold red]")
+            console.print("Contact support or provide --sftp-username.")
             raise click.Abort()
+        config["sftp_username"] = sftp_username
+        save_user_config(config)
     if not sftp_key:
         sftp_key = config.get("sftp_key")
     
@@ -1495,10 +1508,14 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
         console.print("Run [bold]cf login[/bold] to authenticate before pulling.")
         raise click.Abort()
     if not sftp_username:
-        sftp_username = config.get("sftp_username")
+        me = _api_get("/auth/cli/whoami")
+        sftp_username = me.get("sftp_username")
         if not sftp_username:
-            console.print("[bold red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/bold red]")
+            console.print("[bold red]No SFTP account linked to your platform account.[/bold red]")
+            console.print("Contact support or provide --sftp-username.")
             raise click.Abort()
+        config["sftp_username"] = sftp_username
+        save_user_config(config)
     if not sftp_key:
         sftp_key = config.get("sftp_key")
     
@@ -1751,10 +1768,14 @@ def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
         if not platform_id:
             console.print("[dim]Tip: Run [bold]cf link[/bold] to connect this project to the platform.[/dim]\n")
     if not sftp_username:
-        sftp_username = config.get("sftp_username")
+        me = _api_get("/auth/cli/whoami")
+        sftp_username = me.get("sftp_username")
         if not sftp_username:
-            console.print("[red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/red]")
+            console.print("[red]No SFTP account linked to your platform account.[/red]")
+            console.print("Contact support or provide --sftp-username.")
             raise click.Abort()
+        config["sftp_username"] = sftp_username
+        save_user_config(config)
     if not sftp_key:
         sftp_key = config.get("sftp_key")
     
@@ -1885,10 +1906,14 @@ def tapeouts(sftp_host, sftp_username, sftp_key, limit, days):
     """Show all tapeout runs (archived projects) with their timestamps."""
     config = load_user_config()
     if not sftp_username:
-        sftp_username = config.get("sftp_username")
+        me = _api_get("/auth/cli/whoami")
+        sftp_username = me.get("sftp_username")
         if not sftp_username:
-            console.print("[red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/red]")
+            console.print("[red]No SFTP account linked to your platform account.[/red]")
+            console.print("Contact support or provide --sftp-username.")
             raise click.Abort()
+        config["sftp_username"] = sftp_username
+        save_user_config(config)
     if not sftp_key:
         sftp_key = config.get("sftp_key")
     
@@ -2071,10 +2096,14 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
     # Load user config for defaults
     config = load_user_config()
     if not sftp_username:
-        sftp_username = config.get("sftp_username")
+        me = _api_get("/auth/cli/whoami")
+        sftp_username = me.get("sftp_username")
         if not sftp_username:
-            console.print("[bold red]No SFTP username provided and not found in config. Please run 'cf config' or provide --sftp-username.[/bold red]")
+            console.print("[bold red]No SFTP account linked to your platform account.[/bold red]")
+            console.print("Contact support or provide --sftp-username.")
             raise click.Abort()
+        config["sftp_username"] = sftp_username
+        save_user_config(config)
     if not sftp_key:
         sftp_key = config.get("sftp_key")
     
@@ -3886,9 +3915,14 @@ def login_cmd():
             config['api_key'] = api_key
             if user_email:
                 config['user_email'] = user_email
+            sftp_username = poll_data.get('sftp_username')
+            if sftp_username:
+                config['sftp_username'] = sftp_username
             save_user_config(config)
 
             console.print(f"\n[green]✓ Logged in as {user_email or 'authenticated user'}[/green]")
+            if sftp_username:
+                console.print(f"  SFTP account: {sftp_username}")
             console.print(f"  API key saved to {get_config_path()}")
             return
 
