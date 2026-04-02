@@ -3888,12 +3888,24 @@ def unlink_cmd():
     console.print("[green]✓ Platform link removed.[/green] The remote project is not deleted.")
 
 
+DEV_API_URL = 'https://dev-api.chipfoundry.io'
+
+
 @main.command('login')
-def login_cmd():
+@click.option('--test', is_flag=True, help='Authenticate against the dev/test platform')
+def login_cmd(test):
     """Authenticate with ChipFoundry platform via browser."""
     import httpx
     import webbrowser
     import time
+
+    config = load_user_config()
+    if test:
+        config['api_url'] = DEV_API_URL
+        save_user_config(config)
+    elif config.get('api_url') == DEV_API_URL:
+        del config['api_url']
+        save_user_config(config)
 
     api_url = _get_api_url()
     console.print("[bold cyan]ChipFoundry CLI Login[/bold cyan]")
