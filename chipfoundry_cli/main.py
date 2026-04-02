@@ -3330,6 +3330,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     
     docker_cmd = [
         'docker', 'run', '--rm', '--init',
+        '--platform', 'linux/amd64',
         '-v', f'{project_root_path}:{project_root_path}',
         '-v', f'{pdk_root}:{pdk_root}',
         '-e', f'PDK_ROOT={pdk_root}',
@@ -3360,7 +3361,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     console.print(f"[cyan]Checking for Docker image updates...[/cyan]")
     try:
         subprocess.run(
-            ['docker', 'pull', docker_image],
+            ['docker', 'pull', '--platform', 'linux/amd64', docker_image],
             check=True,
             capture_output=True,
         )
