@@ -3220,6 +3220,28 @@ def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
         raise click.Abort()
 
 
+def _upload_precheck_results(project_json_path: Path):
+    """Upload precheck results to the platform (best-effort, never fatal)."""
+    try:
+        with open(project_json_path, "r") as f:
+            pj = json.load(f)
+        precheck_blob = pj.get("precheck")
+        if not precheck_blob:
+            return
+        platform_id = pj.get("project", {}).get("platform_project_id")
+        if not platform_id:
+            return
+        config = load_user_config()
+        if not config.get("api_key"):
+            return
+        _api_put(f"/projects/{platform_id}", {"precheck_results": precheck_blob})
+        console.print("[green]✓ Precheck results synced to platform[/green]")
+    except SystemExit:
+        console.print("[yellow]⚠ Precheck results could not be synced to platform[/yellow]")
+    except Exception:
+        console.print("[yellow]⚠ Precheck results could not be synced to platform[/yellow]")
+
+
 @main.command('precheck')
 @click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
 @click.option('--skip-checks', multiple=True, help='Checks to skip (can be specified multiple times)')
@@ -3368,6 +3390,10 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
             sys.exit(130)
         else:
             console.print(f"[red]✗[/red] Precheck failed (exit code {returncode})")
+
+        _upload_precheck_results(project_json_path)
+
+        if returncode != 0:
             sys.exit(returncode)
             
     except KeyboardInterrupt:
@@ -3727,7 +3753,7 @@ def _api_put(path: str, json_data: dict):
         client.close()
 
 
-_SYNC_KEEP_KEYS = {"project", "tapeout"}
+_SYNC_KEEP_KEYS = {"project", "tapeout", "precheck"}
 
 
 def _slim_project_json(pj: dict) -> dict:
