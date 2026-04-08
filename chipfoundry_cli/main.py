@@ -3248,7 +3248,9 @@ def _upload_precheck_results(project_json_path: Path):
 @click.option('--magic-drc', is_flag=True, help='Include Magic DRC check (optional, off by default)')
 @click.option('--checks', multiple=True, help='Specific checks to run (can be specified multiple times)')
 @click.option('--dry-run', is_flag=True, help='Show the command without running')
-def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
+@click.option('--remote', is_flag=True, help='Queue precheck on the chipIgnite platform (requires cf login + linked project)')
+@click.option('--git-ref', default='main', show_default=True, help='Git branch or tag for remote precheck')
+def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_ref):
     """Run precheck validation on the project.
     
     This runs the cf-precheck tool to validate your design before
@@ -3259,6 +3261,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
         cf precheck --skip-checks lvs            # Skip LVS check
         cf precheck --magic-drc                  # Include optional Magic DRC
         cf precheck --checks topcell_check       # Run specific checks only
+        cf precheck --remote                     # Run on platform (Fargate)
     """
     cwd_root, _ = get_project_json_from_cwd()
     if not project_root and cwd_root:
@@ -3274,6 +3277,75 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
         return
     
     project_json_path = project_root_path / '.cf' / 'project.json'
+
+    if remote:
+        import time
+        import httpx as httpx_remote
+        platform_id = _load_project_platform_id(str(project_root_path))
+        if not platform_id:
+            console.print(
+                "[red]✗[/red] Link this repo to a platform project (set platform_project_id via [bold]cf link[/bold])."
+            )
+            raise SystemExit(1)
+        if dry_run:
+            console.print(f"[cyan]Would POST[/cyan] /projects/{platform_id}/precheck-jobs?git_ref={git_ref}")
+            return
+        config = load_user_config()
+        api_key = config.get('api_key')
+        if not api_key:
+            console.print("[yellow]Not logged in.[/yellow] Run [bold]cf login[/bold] first.")
+            raise SystemExit(1)
+        api_url = _get_api_url()
+        client = httpx_remote.Client(
+            base_url=f"{api_url}/api/v1",
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=120.0,
+        )
+        try:
+            resp = client.post(f"/projects/{platform_id}/precheck-jobs", params={"git_ref": git_ref})
+            if resp.status_code == 401:
+                console.print("[red]✗[/red] API key is invalid or expired. Run [bold]cf login[/bold].")
+                raise SystemExit(1)
+            if not resp.is_success:
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except Exception:
+                    detail = resp.text
+                console.print(f"[red]✗[/red] {detail}")
+                raise SystemExit(1)
+            job = resp.json()
+            jid = job["id"]
+            console.print(f"[cyan]Queued remote precheck[/cyan] job_id={jid} status={job.get('status')}")
+            if job.get("status") == "failed" and job.get("error_message"):
+                console.print(f"[red]✗[/red] {job['error_message']}")
+                raise SystemExit(1)
+            while True:
+                time.sleep(5)
+                r2 = client.get(f"/projects/{platform_id}/precheck-jobs/{jid}")
+                if r2.status_code == 401:
+                    console.print("[red]✗[/red] API key is invalid or expired.")
+                    raise SystemExit(1)
+                r2.raise_for_status()
+                j2 = r2.json()
+                st = j2.get("status")
+                if st in ("completed", "failed"):
+                    if st == "completed":
+                        console.print("[green]✓[/green] Remote precheck completed")
+                        if j2.get("github_pr_url"):
+                            console.print(f"  Pull request: {j2['github_pr_url']}")
+                    else:
+                        console.print(f"[red]✗[/red] Remote precheck failed: {j2.get('error_message') or 'unknown error'}")
+                        raise SystemExit(1)
+                    break
+                console.print(f"[dim]… status={st}[/dim]")
+        except SystemExit:
+            raise
+        except Exception as e:
+            console.print(f"[red]✗[/red] Remote precheck request failed: {e}")
+            raise SystemExit(1)
+        finally:
+            client.close()
+        return
     
     with open(project_json_path, 'r') as f:
         project_data = json.load(f)
