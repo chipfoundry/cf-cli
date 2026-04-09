@@ -1,5 +1,6 @@
 import click
 import getpass
+from chipfoundry_cli.remote_precheck_git import RemotePrecheckGitError, verify_remote_precheck_repo
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
@@ -3278,15 +3279,20 @@ def _upload_precheck_results(project_json_path: Path):
 @click.option('--checks', multiple=True, help='Specific checks to run (can be specified multiple times)')
 @click.option('--dry-run', is_flag=True, help='Show the command without running')
 @click.option('--remote', is_flag=True, help='Queue precheck on the chipIgnite platform (requires cf login + linked project)')
+@click.option(
+    '--poll',
+    is_flag=True,
+    help='With --remote: poll until the job finishes and print progress (5s interval).',
+)
 @click.option('--git-ref', default='main', show_default=True, help='Git branch or tag for remote precheck')
 @click.option(
     '--wait-timeout',
     type=int,
     default=7200,
     show_default=True,
-    help='Max seconds to wait for remote job to finish (0 = wait indefinitely).',
+    help='With --remote --poll: max seconds to wait (0 = no limit). Ignored without --poll.',
 )
-def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_ref, wait_timeout):
+def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, poll, git_ref, wait_timeout):
     """Run precheck validation on the project.
     
     This runs the cf-precheck tool to validate your design before
@@ -3297,8 +3303,13 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
         cf precheck --skip-checks lvs            # Skip LVS check
         cf precheck --magic-drc                  # Include optional Magic DRC
         cf precheck --checks topcell_check       # Run specific checks only
-        cf precheck --remote                     # Run on platform (Fargate)
-        cf precheck --remote --wait-timeout 0    # Wait until job finishes (no time limit)
+        cf precheck --remote                     # Queue on platform; exit when accepted
+        cf precheck --remote --poll              # Wait and stream progress
+        cf precheck --remote --poll --wait-timeout 0    # Poll until done (no time limit)
+
+    Remote precheck requires your local HEAD to match origin for --git-ref, and precheck
+    inputs (wrapper GDS, verilog/rtl/user_defines.v when the GPIO check runs, and tracked
+    .cf/project.json) to match that commit.
     """
     cwd_root, _ = get_project_json_from_cwd()
     if not project_root and cwd_root:
@@ -3315,8 +3326,14 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
     
     project_json_path = project_root_path / '.cf' / 'project.json'
 
+    if poll and not remote:
+        console.print("[red]✗[/red] --poll requires --remote.")
+        raise SystemExit(1)
+
     if remote:
         import time
+        from urllib.parse import urlencode
+
         import httpx as httpx_remote
         platform_id = _load_project_platform_id(str(project_root_path))
         if not platform_id:
@@ -3324,11 +3341,33 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
                 "[red]✗[/red] Link this repo to a platform project (set platform_project_id via [bold]cf link[/bold])."
             )
             raise SystemExit(1)
+        try:
+            verify_remote_precheck_repo(
+                project_root_path,
+                git_ref,
+                checks=tuple(checks),
+                skip_checks=tuple(skip_checks),
+            )
+        except RemotePrecheckGitError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise SystemExit(1)
+        remote_params = [("git_ref", git_ref)]
+        for c in checks:
+            remote_params.append(("checks", c))
+        for s in skip_checks:
+            remote_params.append(("skip_checks", s))
+        if magic_drc:
+            remote_params.append(("magic_drc", "true"))
         if dry_run:
-            console.print(f"[cyan]Would POST[/cyan] /projects/{platform_id}/precheck-jobs?git_ref={git_ref}")
+            console.print(
+                f"[cyan]Would POST[/cyan] /projects/{platform_id}/precheck-jobs?"
+                + urlencode(remote_params)
+            )
             return
-        if wait_timeout < 0:
-            console.print("[red]✗[/red] --wait-timeout must be >= 0 (0 means no limit).")
+        if poll and wait_timeout < 0:
+            console.print(
+                "[red]✗[/red] --wait-timeout must be >= 0 (0 means no limit while polling)."
+            )
             raise SystemExit(1)
         config = load_user_config()
         api_key = config.get('api_key')
@@ -3342,7 +3381,10 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
             timeout=120.0,
         )
         try:
-            resp = client.post(f"/projects/{platform_id}/precheck-jobs", params={"git_ref": git_ref})
+            resp = client.post(
+                f"/projects/{platform_id}/precheck-jobs",
+                params=remote_params,
+            )
             if resp.status_code == 401:
                 console.print("[red]✗[/red] API key is invalid or expired. Run [bold]cf login[/bold].")
                 raise SystemExit(1)
@@ -3370,11 +3412,19 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
                 if job.get("github_pr_url"):
                     console.print(f"  Pull request: {job['github_pr_url']}")
                 return
-            deadline = None if wait_timeout == 0 else time.monotonic() + wait_timeout
-            if deadline:
+            if not poll:
                 console.print(
-                    f"[dim]Stops after {wait_timeout}s if still queued/running "
-                    f"([bold]--wait-timeout 0[/bold] = no limit).[/dim]"
+                    "[dim]Not waiting: use [bold]cf precheck --remote --poll[/bold] to stream progress "
+                    "([bold]--wait-timeout 0[/bold] = no time limit while polling).[/dim]"
+                )
+                return
+            deadline = None if wait_timeout == 0 else time.monotonic() + wait_timeout
+            if wait_timeout == 0:
+                console.print("[dim]Polling until the job completes (no timeout).[/dim]")
+            else:
+                console.print(
+                    f"[dim]Polling every 5s; stops after {wait_timeout}s if still queued or running. "
+                    f"Use [bold]--wait-timeout 0[/bold] for no limit.[/dim]"
                 )
             last_status_seen = st0
             terminal = None
@@ -3392,7 +3442,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
                     )
                     console.print(
                         "[dim]Cancel a stuck run in the portal, or retry with e.g. "
-                        "[bold]cf precheck --remote --wait-timeout 14400[/bold].[/dim]"
+                        "[bold]cf precheck --remote --poll --wait-timeout 14400[/bold].[/dim]"
                     )
                     raise SystemExit(1)
                 time.sleep(5)
