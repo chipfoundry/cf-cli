@@ -3352,10 +3352,11 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, poll
             console.print(f"[red]✗[/red] {e}")
             raise SystemExit(1)
         remote_params = [("git_ref", git_ref)]
-        for c in checks:
-            remote_params.append(("checks", c))
-        for s in skip_checks:
-            remote_params.append(("skip_checks", s))
+        # Single checks= / skip_checks= value so proxies do not drop duplicate query keys.
+        if checks:
+            remote_params.append(("checks", ",".join(checks)))
+        if skip_checks:
+            remote_params.append(("skip_checks", ",".join(skip_checks)))
         if magic_drc:
             remote_params.append(("magic_drc", "true"))
         if dry_run:
