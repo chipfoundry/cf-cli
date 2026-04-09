@@ -1653,6 +1653,13 @@ STATUS_HINTS = {
     "CHANGES_REQUESTED": "Changes requested by the review team. See notes above.",
 }
 
+REMOTE_PRECHECK_STATUS_COLORS = {
+    "queued": "yellow",
+    "running": "cyan bold",
+    "completed": "green",
+    "failed": "red",
+}
+
 
 def _show_platform_status(project_root: str):
     """Show the platform pipeline panel if the project is linked. Returns True if shown."""
@@ -1695,6 +1702,28 @@ def _show_platform_status(project_root: str):
         lines.append(f"[bold]Tapeout:[/bold] [{tc}]{tl}[/{tc}]")
     if project.get('gds_hash'):
         lines.append(f"[bold]GDS Hash:[/bold] {project['gds_hash'][:16]}...")
+    rj = project.get("latest_remote_precheck_job")
+    if isinstance(rj, dict) and rj.get("status"):
+        jst = str(rj.get("status", ""))
+        jc = REMOTE_PRECHECK_STATUS_COLORS.get(jst, "white")
+        lines.append(f"[bold]Remote precheck:[/bold] [{jc}]{jst}[/{jc}]")
+        ref = rj.get("git_ref")
+        if ref:
+            lines.append(f"[dim]  git ref: {ref}[/dim]")
+        created = rj.get("created_at")
+        if created and isinstance(created, str):
+            lines.append(f"[dim]  started: {created[:19]}[/dim]")
+        if jst in ("completed", "failed"):
+            done = rj.get("completed_at")
+            if done and isinstance(done, str):
+                lines.append(f"[dim]  finished: {done[:19]}[/dim]")
+        if jst == "failed" and rj.get("error_message"):
+            err = str(rj["error_message"])
+            if len(err) > 240:
+                err = err[:237] + "..."
+            lines.append(f"[red]  {err}[/red]")
+        if jst == "completed" and rj.get("github_pr_url"):
+            lines.append(f"[green]  PR:[/green] {rj['github_pr_url']}")
     if project.get('updated_at'):
         lines.append(f"[bold]Updated:[/bold] {project['updated_at'][:10]}")
     if project.get('admin_review_notes'):
