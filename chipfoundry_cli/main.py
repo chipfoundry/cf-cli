@@ -3279,7 +3279,14 @@ def _upload_precheck_results(project_json_path: Path):
 @click.option('--dry-run', is_flag=True, help='Show the command without running')
 @click.option('--remote', is_flag=True, help='Queue precheck on the chipIgnite platform (requires cf login + linked project)')
 @click.option('--git-ref', default='main', show_default=True, help='Git branch or tag for remote precheck')
-def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_ref):
+@click.option(
+    '--wait-timeout',
+    type=int,
+    default=7200,
+    show_default=True,
+    help='Max seconds to wait for remote job to finish (0 = wait indefinitely).',
+)
+def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_ref, wait_timeout):
     """Run precheck validation on the project.
     
     This runs the cf-precheck tool to validate your design before
@@ -3291,6 +3298,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
         cf precheck --magic-drc                  # Include optional Magic DRC
         cf precheck --checks topcell_check       # Run specific checks only
         cf precheck --remote                     # Run on platform (Fargate)
+        cf precheck --remote --wait-timeout 0    # Wait until job finishes (no time limit)
     """
     cwd_root, _ = get_project_json_from_cwd()
     if not project_root and cwd_root:
@@ -3319,6 +3327,9 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
         if dry_run:
             console.print(f"[cyan]Would POST[/cyan] /projects/{platform_id}/precheck-jobs?git_ref={git_ref}")
             return
+        if wait_timeout < 0:
+            console.print("[red]✗[/red] --wait-timeout must be >= 0 (0 means no limit).")
+            raise SystemExit(1)
         config = load_user_config()
         api_key = config.get('api_key')
         if not api_key:
@@ -3344,11 +3355,46 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
                 raise SystemExit(1)
             job = resp.json()
             jid = job["id"]
-            console.print(f"[cyan]Queued remote precheck[/cyan] job_id={jid} status={job.get('status')}")
+            st0 = job.get("status") or "unknown"
+            if st0 == "failed":
+                console.print(f"[cyan]Remote precheck[/cyan] job_id={jid} status={st0}")
+            elif st0 == "running":
+                console.print(f"[cyan]Remote precheck started[/cyan] job_id={jid} status={st0}")
+            else:
+                console.print(f"[cyan]Queued remote precheck[/cyan] job_id={jid} status={st0}")
             if job.get("status") == "failed" and job.get("error_message"):
                 console.print(f"[red]✗[/red] {job['error_message']}")
                 raise SystemExit(1)
+            if job.get("status") == "completed":
+                console.print("[green]✓[/green] Remote precheck completed")
+                if job.get("github_pr_url"):
+                    console.print(f"  Pull request: {job['github_pr_url']}")
+                return
+            deadline = None if wait_timeout == 0 else time.monotonic() + wait_timeout
+            if deadline:
+                console.print(
+                    f"[dim]Stops after {wait_timeout}s if still queued/running "
+                    f"([bold]--wait-timeout 0[/bold] = no limit).[/dim]"
+                )
+            last_status_seen = st0
+            terminal = None
+            github_pr_url = None
+            fail_message = None
+            progress_emitted = 0
+            console.print("[dim]Worker log batches appear below as the platform receives them (5s poll).[/dim]")
             while True:
+                if deadline is not None and time.monotonic() > deadline:
+                    console.print(
+                        "[yellow]⚠[/yellow] Timed out waiting for remote precheck (job still queued or running)."
+                    )
+                    console.print(
+                        f"[dim]job_id={jid} — open the project in the portal or run [bold]cf status[/bold].[/dim]"
+                    )
+                    console.print(
+                        "[dim]Cancel a stuck run in the portal, or retry with e.g. "
+                        "[bold]cf precheck --remote --wait-timeout 14400[/bold].[/dim]"
+                    )
+                    raise SystemExit(1)
                 time.sleep(5)
                 r2 = client.get(f"/projects/{platform_id}/precheck-jobs/{jid}")
                 if r2.status_code == 401:
@@ -3357,16 +3403,43 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, git_
                 r2.raise_for_status()
                 j2 = r2.json()
                 st = j2.get("status")
-                if st in ("completed", "failed"):
-                    if st == "completed":
-                        console.print("[green]✓[/green] Remote precheck completed")
-                        if j2.get("github_pr_url"):
-                            console.print(f"  Pull request: {j2['github_pr_url']}")
-                    else:
-                        console.print(f"[red]✗[/red] Remote precheck failed: {j2.get('error_message') or 'unknown error'}")
-                        raise SystemExit(1)
+                prog = j2.get("progress")
+                if isinstance(prog, list) and len(prog) > progress_emitted:
+                    for row in prog[progress_emitted:]:
+                        if not isinstance(row, dict):
+                            continue
+                        msg = row.get("message")
+                        if msg:
+                            det = row.get("details")
+                            if (
+                                isinstance(det, dict)
+                                and det.get("event") == "check_done"
+                            ):
+                                console.print(Text(str(msg), style="bold"))
+                            else:
+                                console.print(Text(str(msg), style="dim"))
+                    progress_emitted = len(prog)
+                if st == "completed":
+                    terminal = "completed"
+                    github_pr_url = j2.get("github_pr_url")
                     break
-                console.print(f"[dim]… status={st}[/dim]")
+                if st == "failed":
+                    terminal = "failed"
+                    fail_message = j2.get("error_message") or "unknown error"
+                    break
+                if st != last_status_seen:
+                    console.print(
+                        f"[dim]… job status[/dim] [cyan]{st or 'unknown'}[/cyan]"
+                    )
+                    last_status_seen = st
+
+            if terminal == "completed":
+                console.print("[green]✓[/green] Remote precheck completed")
+                if github_pr_url:
+                    console.print(f"  Pull request: {github_pr_url}")
+            elif terminal == "failed":
+                console.print(f"[red]✗[/red] Remote precheck failed: {fail_message}")
+                raise SystemExit(1)
         except SystemExit:
             raise
         except Exception as e:
