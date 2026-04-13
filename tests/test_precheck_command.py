@@ -35,6 +35,8 @@ class TestPrecheckCommand:
         assert '--magic-drc' in result.output
         assert '--checks' in result.output
         assert '--dry-run' in result.output
+        assert '--poll' in result.output
+        assert '--wait-timeout' in result.output
     
     def test_precheck_dry_run(self, temp_project_dir):
         """Test precheck command with --dry-run flag."""

@@ -1,5 +1,6 @@
 import click
 import getpass
+from chipfoundry_cli.remote_precheck_git import RemotePrecheckGitError, verify_remote_precheck_repo
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
@@ -1653,6 +1654,13 @@ STATUS_HINTS = {
     "CHANGES_REQUESTED": "Changes requested by the review team. See notes above.",
 }
 
+REMOTE_PRECHECK_STATUS_COLORS = {
+    "queued": "yellow",
+    "running": "cyan bold",
+    "completed": "green",
+    "failed": "red",
+}
+
 
 def _show_platform_status(project_root: str):
     """Show the platform pipeline panel if the project is linked. Returns True if shown."""
@@ -1695,6 +1703,28 @@ def _show_platform_status(project_root: str):
         lines.append(f"[bold]Tapeout:[/bold] [{tc}]{tl}[/{tc}]")
     if project.get('gds_hash'):
         lines.append(f"[bold]GDS Hash:[/bold] {project['gds_hash'][:16]}...")
+    rj = project.get("latest_remote_precheck_job")
+    if isinstance(rj, dict) and rj.get("status"):
+        jst = str(rj.get("status", ""))
+        jc = REMOTE_PRECHECK_STATUS_COLORS.get(jst, "white")
+        lines.append(f"[bold]Remote precheck:[/bold] [{jc}]{jst}[/{jc}]")
+        ref = rj.get("git_ref")
+        if ref:
+            lines.append(f"[dim]  git ref: {ref}[/dim]")
+        created = rj.get("created_at")
+        if created and isinstance(created, str):
+            lines.append(f"[dim]  started: {created[:19]}[/dim]")
+        if jst in ("completed", "failed"):
+            done = rj.get("completed_at")
+            if done and isinstance(done, str):
+                lines.append(f"[dim]  finished: {done[:19]}[/dim]")
+        if jst == "failed" and rj.get("error_message"):
+            err = str(rj["error_message"])
+            if len(err) > 240:
+                err = err[:237] + "..."
+            lines.append(f"[red]  {err}[/red]")
+        if jst == "completed" and rj.get("github_pr_url"):
+            lines.append(f"[green]  PR:[/green] {rj['github_pr_url']}")
     if project.get('updated_at'):
         lines.append(f"[bold]Updated:[/bold] {project['updated_at'][:10]}")
     if project.get('admin_review_notes'):
@@ -3248,7 +3278,21 @@ def _upload_precheck_results(project_json_path: Path):
 @click.option('--magic-drc', is_flag=True, help='Include Magic DRC check (optional, off by default)')
 @click.option('--checks', multiple=True, help='Specific checks to run (can be specified multiple times)')
 @click.option('--dry-run', is_flag=True, help='Show the command without running')
-def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
+@click.option('--remote', is_flag=True, help='Queue precheck on the chipIgnite platform (requires cf login + linked project)')
+@click.option(
+    '--poll',
+    is_flag=True,
+    help='With --remote: poll until the job finishes and print progress (5s interval).',
+)
+@click.option('--git-ref', default='main', show_default=True, help='Git branch or tag for remote precheck')
+@click.option(
+    '--wait-timeout',
+    type=int,
+    default=7200,
+    show_default=True,
+    help='With --remote --poll: max seconds to wait (0 = no limit). Ignored without --poll.',
+)
+def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, poll, git_ref, wait_timeout):
     """Run precheck validation on the project.
     
     This runs the cf-precheck tool to validate your design before
@@ -3259,6 +3303,13 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
         cf precheck --skip-checks lvs            # Skip LVS check
         cf precheck --magic-drc                  # Include optional Magic DRC
         cf precheck --checks topcell_check       # Run specific checks only
+        cf precheck --remote                     # Queue on platform; exit when accepted
+        cf precheck --remote --poll              # Wait and stream progress
+        cf precheck --remote --poll --wait-timeout 0    # Poll until done (no time limit)
+
+    Remote precheck requires your local HEAD to match origin for --git-ref, and precheck
+    inputs (wrapper GDS, verilog/rtl/user_defines.v when the GPIO check runs, and tracked
+    .cf/project.json) to match that commit.
     """
     cwd_root, _ = get_project_json_from_cwd()
     if not project_root and cwd_root:
@@ -3274,6 +3325,180 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
         return
     
     project_json_path = project_root_path / '.cf' / 'project.json'
+
+    if poll and not remote:
+        console.print("[red]✗[/red] --poll requires --remote.")
+        raise SystemExit(1)
+
+    if remote:
+        import time
+        from urllib.parse import urlencode
+
+        import httpx as httpx_remote
+        platform_id = _load_project_platform_id(str(project_root_path))
+        if not platform_id:
+            console.print(
+                "[red]✗[/red] Link this repo to a platform project (set platform_project_id via [bold]cf link[/bold])."
+            )
+            raise SystemExit(1)
+        try:
+            verify_remote_precheck_repo(
+                project_root_path,
+                git_ref,
+                checks=tuple(checks),
+                skip_checks=tuple(skip_checks),
+            )
+        except RemotePrecheckGitError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise SystemExit(1)
+        remote_params = [("git_ref", git_ref)]
+        # Single checks= / skip_checks= value so proxies do not drop duplicate query keys.
+        if checks:
+            remote_params.append(("checks", ",".join(checks)))
+        if skip_checks:
+            remote_params.append(("skip_checks", ",".join(skip_checks)))
+        if magic_drc:
+            remote_params.append(("magic_drc", "true"))
+        if dry_run:
+            console.print(
+                f"[cyan]Would POST[/cyan] /projects/{platform_id}/precheck-jobs?"
+                + urlencode(remote_params)
+            )
+            return
+        if poll and wait_timeout < 0:
+            console.print(
+                "[red]✗[/red] --wait-timeout must be >= 0 (0 means no limit while polling)."
+            )
+            raise SystemExit(1)
+        config = load_user_config()
+        api_key = config.get('api_key')
+        if not api_key:
+            console.print("[yellow]Not logged in.[/yellow] Run [bold]cf login[/bold] first.")
+            raise SystemExit(1)
+        api_url = _get_api_url()
+        client = httpx_remote.Client(
+            base_url=f"{api_url}/api/v1",
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=120.0,
+        )
+        try:
+            resp = client.post(
+                f"/projects/{platform_id}/precheck-jobs",
+                params=remote_params,
+            )
+            if resp.status_code == 401:
+                console.print("[red]✗[/red] API key is invalid or expired. Run [bold]cf login[/bold].")
+                raise SystemExit(1)
+            if not resp.is_success:
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except Exception:
+                    detail = resp.text
+                console.print(f"[red]✗[/red] {detail}")
+                raise SystemExit(1)
+            job = resp.json()
+            jid = job["id"]
+            st0 = job.get("status") or "unknown"
+            if st0 == "failed":
+                console.print(f"[cyan]Remote precheck[/cyan] job_id={jid} status={st0}")
+            elif st0 == "running":
+                console.print(f"[cyan]Remote precheck started[/cyan] job_id={jid} status={st0}")
+            else:
+                console.print(f"[cyan]Queued remote precheck[/cyan] job_id={jid} status={st0}")
+            if job.get("status") == "failed" and job.get("error_message"):
+                console.print(f"[red]✗[/red] {job['error_message']}")
+                raise SystemExit(1)
+            if job.get("status") == "completed":
+                console.print("[green]✓[/green] Remote precheck completed")
+                if job.get("github_pr_url"):
+                    console.print(f"  Pull request: {job['github_pr_url']}")
+                return
+            if not poll:
+                console.print(
+                    "[dim]Not waiting: use [bold]cf precheck --remote --poll[/bold] to stream progress "
+                    "([bold]--wait-timeout 0[/bold] = no time limit while polling).[/dim]"
+                )
+                return
+            deadline = None if wait_timeout == 0 else time.monotonic() + wait_timeout
+            if wait_timeout == 0:
+                console.print("[dim]Polling until the job completes (no timeout).[/dim]")
+            else:
+                console.print(
+                    f"[dim]Polling every 5s; stops after {wait_timeout}s if still queued or running. "
+                    f"Use [bold]--wait-timeout 0[/bold] for no limit.[/dim]"
+                )
+            last_status_seen = st0
+            terminal = None
+            github_pr_url = None
+            fail_message = None
+            progress_emitted = 0
+            console.print("[dim]Worker log batches appear below as the platform receives them (5s poll).[/dim]")
+            while True:
+                if deadline is not None and time.monotonic() > deadline:
+                    console.print(
+                        "[yellow]⚠[/yellow] Timed out waiting for remote precheck (job still queued or running)."
+                    )
+                    console.print(
+                        f"[dim]job_id={jid} — open the project in the portal or run [bold]cf status[/bold].[/dim]"
+                    )
+                    console.print(
+                        "[dim]Cancel a stuck run in the portal, or retry with e.g. "
+                        "[bold]cf precheck --remote --poll --wait-timeout 14400[/bold].[/dim]"
+                    )
+                    raise SystemExit(1)
+                time.sleep(5)
+                r2 = client.get(f"/projects/{platform_id}/precheck-jobs/{jid}")
+                if r2.status_code == 401:
+                    console.print("[red]✗[/red] API key is invalid or expired.")
+                    raise SystemExit(1)
+                r2.raise_for_status()
+                j2 = r2.json()
+                st = j2.get("status")
+                prog = j2.get("progress")
+                if isinstance(prog, list) and len(prog) > progress_emitted:
+                    for row in prog[progress_emitted:]:
+                        if not isinstance(row, dict):
+                            continue
+                        msg = row.get("message")
+                        if msg:
+                            det = row.get("details")
+                            if (
+                                isinstance(det, dict)
+                                and det.get("event") == "check_done"
+                            ):
+                                console.print(Text(str(msg), style="bold"))
+                            else:
+                                console.print(Text(str(msg), style="dim"))
+                    progress_emitted = len(prog)
+                if st == "completed":
+                    terminal = "completed"
+                    github_pr_url = j2.get("github_pr_url")
+                    break
+                if st == "failed":
+                    terminal = "failed"
+                    fail_message = j2.get("error_message") or "unknown error"
+                    break
+                if st != last_status_seen:
+                    console.print(
+                        f"[dim]… job status[/dim] [cyan]{st or 'unknown'}[/cyan]"
+                    )
+                    last_status_seen = st
+
+            if terminal == "completed":
+                console.print("[green]✓[/green] Remote precheck completed")
+                if github_pr_url:
+                    console.print(f"  Pull request: {github_pr_url}")
+            elif terminal == "failed":
+                console.print(f"[red]✗[/red] Remote precheck failed: {fail_message}")
+                raise SystemExit(1)
+        except SystemExit:
+            raise
+        except Exception as e:
+            console.print(f"[red]✗[/red] Remote precheck request failed: {e}")
+            raise SystemExit(1)
+        finally:
+            client.close()
+        return
     
     with open(project_json_path, 'r') as f:
         project_data = json.load(f)
@@ -3319,12 +3544,14 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run):
     
     if magic_drc:
         precheck_args.append('--magic-drc')
-    
-    if skip_checks:
-        precheck_args.extend(['--skip-checks'] + list(skip_checks))
-    
+
+    # Positional check names before --skip-checks (matches cf-precheck argparse; see
+    # precheck-runner _cf_precheck_shell_cmd).
     if checks:
         precheck_args.extend(list(checks))
+
+    if skip_checks:
+        precheck_args.extend(['--skip-checks'] + list(skip_checks))
     
     inner_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null && exec cf-precheck ' + ' '.join(precheck_args)
     
