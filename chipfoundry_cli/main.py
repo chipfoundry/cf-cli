@@ -3544,12 +3544,14 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, poll
     
     if magic_drc:
         precheck_args.append('--magic-drc')
-    
-    if skip_checks:
-        precheck_args.extend(['--skip-checks'] + list(skip_checks))
-    
+
+    # Positional check names before --skip-checks (matches cf-precheck argparse; see
+    # precheck-runner _cf_precheck_shell_cmd).
     if checks:
         precheck_args.extend(list(checks))
+
+    if skip_checks:
+        precheck_args.extend(['--skip-checks'] + list(skip_checks))
     
     inner_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null && exec cf-precheck ' + ' '.join(precheck_args)
     
