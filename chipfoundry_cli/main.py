@@ -3278,7 +3278,7 @@ def _upload_precheck_results(project_json_path: Path):
 @click.option('--magic-drc', is_flag=True, help='Include Magic DRC check (optional, off by default)')
 @click.option('--checks', multiple=True, help='Specific checks to run (can be specified multiple times)')
 @click.option('--dry-run', is_flag=True, help='Show the command without running')
-@click.option('--remote', is_flag=True, help='Queue precheck on the chipIgnite platform (requires cf login + linked project)')
+@click.option('--remote', is_flag=True, help='Queue precheck on the ChipFoundry platform (requires cf login + linked project)')
 @click.option(
     '--poll',
     is_flag=True,
