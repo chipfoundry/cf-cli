@@ -176,20 +176,39 @@ def main():
 
 @main.command('config')
 def config_cmd():
-    """Configure user-level SFTP credentials (username and key)."""
-    console.print("[bold cyan]ChipFoundry CLI User Configuration[/bold cyan]")
-    username = console.input("Enter your ChipFoundry SFTP username: ").strip()
-    key_path = console.input("Enter path to your SFTP private key (leave blank for ~/.ssh/chipfoundry-key): ").strip()
+    """Configure a custom SSH private key path for SFTP access."""
+    console.print("[bold cyan]ChipFoundry CLI Configuration[/bold cyan]")
+    key_path = console.input("Enter path to your SSH private key (leave blank for ~/.ssh/chipfoundry-key): ").strip()
     if not key_path:
         key_path = os.path.expanduser('~/.ssh/chipfoundry-key')
     else:
         key_path = os.path.abspath(os.path.expanduser(key_path))
-    config = {
-        "sftp_username": username,
-        "sftp_key": key_path,
-    }
+    config = load_user_config()
+    config["sftp_key"] = key_path
     save_user_config(config)
     console.print(f"[green]Configuration saved to {get_config_path()}[/green]")
+
+def _try_register_ssh_key(public_key: str) -> bool:
+    """Attempt to register the SSH public key on the user's platform profile.
+
+    Returns True if the key was registered successfully, False otherwise.
+    """
+    config = load_user_config()
+    if not config.get("api_key"):
+        return False
+    try:
+        _api_put("/users/me", {"ssh_public_key": public_key})
+        return True
+    except SystemExit:
+        return False
+
+
+def _print_manual_key_instructions():
+    """Print fallback instructions when auto-registration is not available."""
+    console.print("[bold cyan]To register this key:[/bold cyan]")
+    console.print("  Run [bold]cf login[/bold] first, then [bold]cf keygen --overwrite[/bold] to auto-register.")
+    console.print("  Or paste the public key at [bold]https://platform.chipfoundry.io/ssh-key[/bold]")
+
 
 @main.command('keygen')
 @click.option('--overwrite', is_flag=True, help='Overwrite existing key if it already exists.')
@@ -211,11 +230,10 @@ def keygen(overwrite):
                 public_key = f.read().strip()
                 print(f"{public_key}", end="")
             print("")
-            console.print("[bold cyan]Next steps:[/bold cyan]")
-            console.print("1. Copy the public key above")
-            console.print("2. Submit it to the registration form at: https://chipfoundry.io/sftp-registration")
-            console.print("3. Wait for account approval")
-            console.print("4. Use 'cf config' to configure your SFTP credentials")
+            if _try_register_ssh_key(public_key):
+                console.print("[green]✓ Key registered on your ChipFoundry profile. SFTP access is ready.[/green]")
+            else:
+                _print_manual_key_instructions()
             return
         else:
             console.print(f"[yellow]Overwriting existing key at {private_key_path}[/yellow]")
@@ -229,7 +247,6 @@ def keygen(overwrite):
     console.print("[cyan]Generating new RSA SSH key for ChipFoundry...[/cyan]")
     
     try:
-        # Use ssh-keygen to generate the key
         cmd = [
             'ssh-keygen',
             '-t', 'rsa',
@@ -256,12 +273,10 @@ def keygen(overwrite):
         print(f"{public_key}", end="")
         print("")
         
-        # Display instructions
-        console.print("[bold cyan]Next steps:[/bold cyan]")
-        console.print("1. Copy the public key above")
-        console.print("2. Submit it to the registration form at: https://chipfoundry.io/sftp-registration")
-        console.print("3. Wait for account approval")
-        console.print("4. Use 'cf config' to configure your SFTP credentials")
+        if _try_register_ssh_key(public_key):
+            console.print("[green]✓ Key registered on your ChipFoundry profile. SFTP access is ready.[/green]")
+        else:
+            _print_manual_key_instructions()
         
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Failed to generate SSH key: {e}[/red]")
@@ -289,11 +304,7 @@ def keyview():
         public_key = f.read().strip()
         print(f"{public_key}")
     print("")
-    console.print("[bold cyan]Next steps:[/bold cyan]")
-    console.print("1. Copy the public key above")
-    console.print("2. Submit it to the registration form at: https://chipfoundry.io/sftp-registration")
-    console.print("3. Wait for account approval")
-    console.print("4. Use 'cf config' to configure your SFTP credentials")
+    _print_manual_key_instructions()
 
 @main.command('init')
 @click.option('--project-root', required=False, type=click.Path(file_okay=False), help='Directory to create the project in (defaults to current directory).')
