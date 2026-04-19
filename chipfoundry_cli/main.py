@@ -1489,10 +1489,19 @@ def _push_remote(project_root: Optional[str], project_name: Optional[str], dry_r
         )
         raise click.Abort()
     if not project.get("remote_precheck_github_ready"):
+        install_url = (project.get("remote_precheck_github_app_install_url") or "").strip()
         console.print(
-            "[red]The ChipFoundry GitHub App is not installed on this repository[/red] (or the URL is invalid).\n"
-            "Install it from the project page in the portal, then retry."
+            "[red]The ChipFoundry GitHub App is not installed on this repository[/red] "
+            "(or the repo URL is wrong)."
         )
+        if install_url:
+            console.print(f"Install the app here: [cyan]{install_url}[/cyan]")
+            console.print(
+                f"Make sure [bold]{github_repo_url}[/bold] is selected during installation, "
+                "then re-run [bold]cf push --remote[/bold]."
+            )
+        else:
+            console.print("Install it from the project page in the portal, then retry.")
         raise click.Abort()
 
     final_project_name = project_name or Path(project_root).name
