@@ -1468,6 +1468,9 @@ def _push_remote(project_root: Optional[str], project_name: Optional[str], dry_r
     except RemotePushGitError as e:
         console.print(f"[red]Remote push not ready:[/red] {e}")
         raise click.Abort()
+    except Exception as e:  # defensive: never leak a raw traceback here
+        console.print(f"[red]Remote push could not verify the repo:[/red] {type(e).__name__}: {e}")
+        raise click.Abort()
 
     console.print(
         f"[green]✓ Local checkout ready[/green] (HEAD [cyan]{head_sha[:7]}[/cyan] is on [cyan]{remote_ref}[/cyan])"

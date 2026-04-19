@@ -251,7 +251,18 @@ def _head_on_any_remote_ref(repo: Path, head_sha: str) -> Optional[str]:
 
 def _push_critical_paths(repo: Path, project_json: Path) -> Set[str]:
     """Paths that must be clean at HEAD for a remote push to match local state."""
-    kind_gds, gds_rel = _detect_wrapper_gds(repo)
+    try:
+        kind_gds, gds_rel = _detect_wrapper_gds(repo)
+    except RemotePrecheckGitError as e:
+        # Re-raise under the push error class so the CLI surfaces one consistent
+        # message and can catch a single exception type.
+        raise RemotePushGitError(
+            f"{e} "
+            "Check that the wrapper GDS is committed and located under the "
+            "expected path (e.g. gds/user_project_wrapper.gds, "
+            "gds/openframe_project_wrapper.gds, etc.). If you use Git LFS, "
+            "run `git lfs pull` so the actual file (not the pointer) is present."
+        ) from e
     out: Set[str] = {gds_rel}
 
     cf_type = _load_cf_project_type(project_json)
