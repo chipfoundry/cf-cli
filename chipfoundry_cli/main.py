@@ -1505,10 +1505,12 @@ def _push_remote(project_root: Optional[str], project_name: Optional[str], dry_r
         return
 
     console.print(f"Asking platform to fetch [cyan]{head_sha[:7]}[/cyan] from {github_repo_url}…")
+    console.print("[dim](large files may take several minutes — please keep this terminal open)[/dim]")
     try:
         resp = _api_post(
             f"/projects/{platform_id}/remote-push",
             {"commit_sha": head_sha, "project_name": final_project_name},
+            timeout=600.0,
         )
     except SystemExit:
         raise click.Abort()
@@ -4209,11 +4211,19 @@ def _api_get(path: str):
         client.close()
 
 
-def _api_post(path: str, json_data: dict):
-    """Authenticated POST to the platform API. Returns parsed JSON or raises SystemExit."""
+def _api_post(path: str, json_data: dict, timeout: Optional[float] = None):
+    """Authenticated POST to the platform API. Returns parsed JSON or raises SystemExit.
+
+    `timeout` (seconds) overrides the client default for this request only.
+    Use a large value for long-running endpoints such as remote-push, which
+    waits for the platform to fetch files from GitHub and stage them on EFS.
+    """
     client, _ = _api_client()
     try:
-        resp = client.post(path, json=json_data)
+        kwargs = {"json": json_data}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = client.post(path, **kwargs)
         if resp.status_code == 401:
             console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
             raise SystemExit(1)
