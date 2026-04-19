@@ -1,5 +1,6 @@
 import click
 import getpass
+from typing import Optional, List
 from chipfoundry_cli.remote_precheck_git import RemotePrecheckGitError, verify_remote_precheck_repo
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
@@ -8,7 +9,8 @@ from chipfoundry_cli.utils import (
     open_html_in_browser, download_with_progress, update_repo_files,
     fetch_versions_from_upstream, parse_user_defines_v, update_user_defines_v,
     get_gpio_config_from_project_json, save_gpio_config_to_project_json,
-    GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE
+    GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE,
+    detect_github_repo_url, get_head_commit_sha,
 )
 import os
 from pathlib import Path
@@ -306,31 +308,87 @@ def keyview():
     print("")
     _print_manual_key_instructions()
 
+def _prompt_with_default(label: str, current: Optional[str], detected: Optional[str] = None) -> Optional[str]:
+    """Interactive prompt with sensible defaults for current/detected values.
+
+    Behavior:
+    - No current, no detected: Enter leaves the value unset (None).
+    - Only current:            Enter keeps current.
+    - Only detected:           Enter accepts detected.
+    - Current == detected:     Enter accepts the (single) value.
+    - Current != detected:     Enter accepts `detected` (ground truth, e.g. git
+                               remote). Type `k` or `keep` to keep current.
+    Any typed value becomes the new value. `clear` (case-insensitive) explicitly
+    removes the value (returns None).
+    """
+    normalized_current = current.strip() if isinstance(current, str) and current.strip() else None
+    normalized_detected = detected.strip() if isinstance(detected, str) and detected.strip() else None
+    conflict = (
+        normalized_current is not None
+        and normalized_detected is not None
+        and normalized_current != normalized_detected
+    )
+
+    if conflict:
+        effective_default = normalized_detected
+    elif normalized_detected is not None:
+        effective_default = normalized_detected
+    else:
+        effective_default = normalized_current
+
+    console.print(f"[bold]{label}[/bold]")
+    if normalized_current:
+        console.print(f"  current:  [cyan]{normalized_current}[/cyan]")
+    if normalized_detected and normalized_detected != normalized_current:
+        console.print(f"  detected: [cyan]{normalized_detected}[/cyan]")
+
+    if conflict:
+        hint = "enter=use detected, k=keep current, clear=remove, or type new value"
+    elif effective_default:
+        hint = "enter=accept, clear=remove, or type new value"
+    else:
+        hint = "enter=skip, or type value"
+
+    raw = console.input(f"  [dim]{hint}[/dim]: ").strip()
+    if raw == "":
+        return effective_default
+    lowered = raw.lower()
+    if lowered == "clear":
+        return None
+    if conflict and lowered in ("k", "keep"):
+        return normalized_current
+    return raw
+
+
 @main.command('init')
-@click.option('--project-root', required=False, type=click.Path(file_okay=False), help='Directory to create the project in (defaults to current directory).')
+@click.option('--project-root', required=False, type=click.Path(file_okay=False), help='Project directory (defaults to current directory).')
 @click.option('--shuttle', default=None, help='Shuttle name or ID to associate with the project.')
-@click.option('--description', default=None, help='Project description.')
+@click.option('--description', default=None, help='Project description (skips description prompt).')
 def init(project_root, shuttle, description):
-    """Initialize a new ChipFoundry project (.cf/project.json) in the given directory."""
+    """Initialize or refresh the local ChipFoundry project configuration.
+
+    Running `cf init` is idempotent: if the project is already linked to the
+    platform, existing values are pulled in, auto-detected values from the
+    workspace (e.g. GitHub remote) are offered, and only the changes you
+    confirm are pushed back via PUT. The `platform_project_id` link is
+    preserved — use `cf unlink` to disconnect.
+    """
     if not project_root:
         project_root = os.getcwd()
+    project_root = str(Path(project_root).resolve())
     cf_dir = Path(project_root) / '.cf'
     cf_dir.mkdir(parents=True, exist_ok=True)
     project_json_path = cf_dir / 'project.json'
 
-    existing_platform_id = None
+    local_data: dict = {}
     if project_json_path.exists():
-        with open(project_json_path) as f:
-            existing_data = json.load(f)
-        existing_platform_id = existing_data.get('project', {}).get('platform_project_id')
-        if existing_platform_id:
-            console.print(f"[yellow]This project is already linked to platform project {existing_platform_id}.[/yellow]")
-            console.print("Use [bold]cf status[/bold] to check it or [bold]cf unlink[/bold] to disconnect.")
-            return
-        overwrite = console.input(f"[yellow]project.json already exists at {project_json_path}. Overwrite? (y/N): [/yellow]").strip().lower()
-        if overwrite != 'y':
-            console.print("[red]Aborted project initialization.[/red]")
-            return
+        try:
+            with open(project_json_path) as f:
+                local_data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            console.print(f"[red]✗ Could not read existing {project_json_path}: {e}[/red]")
+            raise click.Abort()
+    local_proj = local_data.get('project', {}) if isinstance(local_data, dict) else {}
 
     config = load_user_config()
     username = config.get("sftp_username")
@@ -347,92 +405,159 @@ def init(project_root, shuttle, description):
         console.print("[bold red]No SFTP account linked to your platform account. Please run 'cf login' first.[/bold red]")
         raise click.Abort()
 
+    api_key = config.get('api_key')
+    platform_id = local_proj.get('platform_project_id')
+    platform_proj: Optional[dict] = None
+    if platform_id and api_key:
+        try:
+            platform_proj = _api_get(f"/projects/{platform_id}")
+        except SystemExit:
+            console.print(f"[yellow]Could not fetch linked platform project {platform_id}; continuing with local data only.[/yellow]")
+            platform_proj = None
+
+    mode = "refresh" if platform_proj else "create"
+    console.print(f"[bold cyan]cf init[/bold cyan] — {'refreshing linked project' if mode == 'refresh' else 'initializing new project'}")
+
+    def _merged(key_local: str, key_platform: Optional[str] = None) -> Optional[str]:
+        """Prefer platform value when linked, else local value."""
+        kp = key_platform or key_local
+        if platform_proj is not None and platform_proj.get(kp) not in (None, ""):
+            return platform_proj.get(kp)
+        val = local_proj.get(key_local)
+        return val if val not in (None, "") else None
+
+    current_name = _merged('name')
+    default_name = current_name or Path(project_root).name
+    detected_type = None
     gds_dir = Path(project_root) / 'gds'
-    gds_type = None
     for gds_name, gtype in GDS_TYPE_MAP.items():
         if (gds_dir / gds_name).exists():
-            gds_type = gtype
+            detected_type = gtype
             break
+    current_type = local_proj.get('type') or (platform_proj or {}).get('design_type')
+    current_desc = _merged('description')
+    current_github = (platform_proj or {}).get('github_repo_url') if platform_proj else local_proj.get('github_repo_url')
+    detected_github = detect_github_repo_url(project_root)
 
-    default_name = Path(project_root).name
-    name = console.input(f"Project name (detected: [cyan]{default_name}[/cyan]): ").strip() or default_name
+    name = _prompt_with_default("Project name", current_name, default_name) or default_name
+    project_type = _prompt_with_default(
+        "Project type (digital/analog/openframe)", current_type, detected_type
+    )
+    if not project_type:
+        console.print("[red]Project type is required.[/red]")
+        raise click.Abort()
 
-    if gds_type:
-        project_type = console.input(f"Project type (digital/analog/openframe) (detected: [cyan]{gds_type}[/cyan]): ").strip() or gds_type
+    if description is not None:
+        description_val: Optional[str] = description or None
     else:
-        project_type = console.input("Project type (digital/analog/openframe): ").strip()
+        description_val = _prompt_with_default("Description", current_desc, None)
 
-    version = "1"
-    data = {
-        "project": {
-            "name": name,
-            "type": project_type,
-            "user": username,
-            "version": version,
-            "user_project_wrapper_hash": "",
-            "submission_state": "Draft"
-        }
-    }
+    github_repo_url = _prompt_with_default("GitHub repo URL", current_github, detected_github)
 
-    api_key = config.get('api_key')
-    if api_key:
-        shuttle_id = None
-        if not shuttle:
-            try:
-                shuttles = _api_get("/shuttles/available")
-                if shuttles:
-                    shuttles.sort(key=lambda s: s.get('tapeout_date', '9999-12-31'))
-                    console.print("\n[bold]Available shuttles:[/bold]")
-                    for i, s in enumerate(shuttles, 1):
-                        deadline = s.get('tapeout_date', '')
-                        console.print(f"  [cyan]{i}[/cyan]. {s['name']}{f' — submission deadline {deadline}' if deadline else ''}")
-                    console.print(f"  [cyan]{len(shuttles) + 1}[/cyan]. Skip — choose later")
-                    choice = console.input("\nSelect shuttle: ").strip()
-                    try:
-                        idx = int(choice) - 1
-                        if 0 <= idx < len(shuttles):
-                            shuttle_id = shuttles[idx]['id']
-                    except (ValueError, IndexError):
-                        pass
-            except SystemExit:
-                console.print("[dim]Could not fetch shuttles — continuing without shuttle selection.[/dim]")
-        else:
-            shuttle_id = shuttle
-
-        create_data = {
-            "name": name,
-            "description": description or "",
-            "design_type": project_type,
-            "registration_source": "cli",
-        }
-        if shuttle_id:
-            create_data["shuttle_id"] = str(shuttle_id)
-
-        try:
-            project_resp = _api_post("/projects", create_data)
-            platform_id = project_resp.get('id')
-            data['project']['platform_project_id'] = platform_id
-
-            with open(project_json_path, 'w') as f:
-                json.dump(data, f, indent=2)
-
-            portal_url = _get_portal_url()
-            console.print(f"\n[green]✓ Project created on platform[/green]")
-            console.print(f"  Name:    {name}")
-            console.print(f"  ID:      {platform_id}")
-            if project_resp.get('shuttle_name'):
-                console.print(f"  Shuttle: {project_resp['shuttle_name']}")
-            console.print(f"  Status:  Draft")
-            console.print(f"  Portal:  {portal_url}/projects/{platform_id}")
-            return
-        except SystemExit:
-            console.print("[yellow]Platform project creation failed — saving local project only.[/yellow]")
+    data = local_data if isinstance(local_data, dict) else {}
+    proj = data.setdefault('project', {})
+    proj['name'] = name
+    proj['type'] = project_type
+    proj['user'] = username
+    proj.setdefault('version', local_proj.get('version') or "1")
+    proj.setdefault('user_project_wrapper_hash', local_proj.get('user_project_wrapper_hash', ""))
+    proj.setdefault('submission_state', local_proj.get('submission_state', "Draft"))
+    if github_repo_url:
+        proj['github_repo_url'] = github_repo_url
     else:
+        proj.pop('github_repo_url', None)
+
+    if not api_key:
+        with open(project_json_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        console.print(f"[green]✓ Saved local project config at {project_json_path}[/green]")
         console.print("[dim]Tip: Run [bold]cf login[/bold] to connect this project to the platform.[/dim]")
+        return
 
-    with open(project_json_path, 'w') as f:
-        json.dump(data, f, indent=2)
-    console.print(f"[green]✓ Initialized project at {project_json_path}[/green]")
+    if platform_proj:
+        update_payload: dict = {}
+        if name != platform_proj.get('name'):
+            update_payload['name'] = name
+        if description_val != (platform_proj.get('description') or None):
+            update_payload['description'] = description_val or ""
+        if project_type != platform_proj.get('design_type'):
+            update_payload['design_type'] = project_type
+        if (github_repo_url or None) != (platform_proj.get('github_repo_url') or None):
+            update_payload['github_repo_url'] = github_repo_url or ""
+
+        if update_payload:
+            try:
+                updated = _api_put(f"/projects/{platform_id}", update_payload)
+                platform_proj = updated
+                console.print(f"[green]✓ Updated platform project[/green] ({', '.join(update_payload.keys())})")
+            except SystemExit:
+                console.print("[yellow]Platform update failed — local changes saved.[/yellow]")
+        else:
+            console.print("[dim]No platform changes needed.[/dim]")
+
+        proj['platform_project_id'] = platform_id
+        with open(project_json_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        portal_url = _get_portal_url()
+        console.print(f"  Name:    {name}")
+        console.print(f"  ID:      {platform_id}")
+        if github_repo_url:
+            console.print(f"  GitHub:  {github_repo_url}")
+        console.print(f"  Portal:  {portal_url}/projects/{platform_id}")
+        return
+
+    shuttle_id = shuttle
+    if not shuttle_id:
+        try:
+            shuttles = _api_get("/shuttles/available")
+            if shuttles:
+                shuttles.sort(key=lambda s: s.get('tapeout_date', '9999-12-31'))
+                console.print("\n[bold]Available shuttles:[/bold]")
+                for i, s in enumerate(shuttles, 1):
+                    deadline = s.get('tapeout_date', '')
+                    console.print(f"  [cyan]{i}[/cyan]. {s['name']}{f' — submission deadline {deadline}' if deadline else ''}")
+                console.print(f"  [cyan]{len(shuttles) + 1}[/cyan]. Skip — choose later")
+                choice = console.input("\nSelect shuttle: ").strip()
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(shuttles):
+                        shuttle_id = shuttles[idx]['id']
+                except (ValueError, IndexError):
+                    pass
+        except SystemExit:
+            console.print("[dim]Could not fetch shuttles — continuing without shuttle selection.[/dim]")
+
+    create_data: dict = {
+        "name": name,
+        "description": description_val or "",
+        "design_type": project_type,
+        "registration_source": "cli",
+    }
+    if shuttle_id:
+        create_data["shuttle_id"] = str(shuttle_id)
+    if github_repo_url:
+        create_data["github_repo_url"] = github_repo_url
+
+    try:
+        project_resp = _api_post("/projects", create_data)
+        new_id = project_resp.get('id')
+        proj['platform_project_id'] = new_id
+        with open(project_json_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        portal_url = _get_portal_url()
+        console.print(f"\n[green]✓ Project created on platform[/green]")
+        console.print(f"  Name:    {name}")
+        console.print(f"  ID:      {new_id}")
+        if project_resp.get('shuttle_name'):
+            console.print(f"  Shuttle: {project_resp['shuttle_name']}")
+        if github_repo_url:
+            console.print(f"  GitHub:  {github_repo_url}")
+        console.print(f"  Status:  Draft")
+        console.print(f"  Portal:  {portal_url}/projects/{new_id}")
+    except SystemExit:
+        console.print("[yellow]Platform project creation failed — saving local project only.[/yellow]")
+        with open(project_json_path, 'w') as f:
+            json.dump(data, f, indent=2)
 
 @main.command('gpio-config')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
@@ -1296,6 +1421,142 @@ def gpio_config(project_root, view):
             console.print(f"[red]Error updating user_defines.v: {e}[/red]")
 
 
+def _push_remote(project_root: Optional[str], project_name: Optional[str], dry_run: bool, submit: bool) -> None:
+    """Push project files to the platform via the ChipFoundry GitHub App (HTTPS only).
+
+    Preconditions enforced here:
+    - Project is linked (`platform_project_id` in .cf/project.json).
+    - Logged in (api key).
+    - Local git HEAD is reachable from a remote ref on origin and the files the
+      platform will fetch (wrapper GDS, user_defines.v when required, .cf/project.json
+      when tracked) are clean at HEAD.
+
+    On success the backend:
+    1. Resolves the GitHub App installation for the project's `github_repo_url`.
+    2. Selects the three push-critical blobs at `commit_sha` and asks the
+       SFTP home-dir Lambda to stage them into the customer's EFS landing zone.
+    3. Syncs project.json (same as SFTP push) and, if requested, submits for review.
+    """
+    from chipfoundry_cli.remote_precheck_git import RemotePushGitError, verify_push_repo
+
+    cwd_root, cwd_project_name = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_name and cwd_project_name:
+        project_name = cwd_project_name
+    if not project_root:
+        console.print(
+            "[red]No project root specified and no .cf/project.json found in current directory.[/red]"
+        )
+        console.print("Provide --project-root or run from a linked project.")
+        raise click.Abort()
+    project_root = str(Path(project_root).resolve())
+
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id:
+        console.print("[red]Project is not linked to the platform.[/red]")
+        console.print("Run [bold]cf link[/bold] to connect this project, or [bold]cf init[/bold] to create a new one.")
+        raise click.Abort()
+
+    config = load_user_config()
+    if not config.get("api_key"):
+        console.print("[red]Not logged in.[/red] Run [bold]cf login[/bold] before using --remote.")
+        raise click.Abort()
+
+    try:
+        head_sha, remote_ref = verify_push_repo(Path(project_root))
+    except RemotePushGitError as e:
+        console.print(f"[red]Remote push not ready:[/red] {e}")
+        raise click.Abort()
+    except Exception as e:  # defensive: never leak a raw traceback here
+        console.print(f"[red]Remote push could not verify the repo:[/red] {type(e).__name__}: {e}")
+        raise click.Abort()
+
+    console.print(
+        f"[green]✓ Local checkout ready[/green] (HEAD [cyan]{head_sha[:7]}[/cyan] is on [cyan]{remote_ref}[/cyan])"
+    )
+
+    try:
+        project = _api_get(f"/projects/{platform_id}")
+    except SystemExit:
+        raise click.Abort()
+
+    github_repo_url = (project.get("github_repo_url") or "").strip()
+    if not github_repo_url:
+        console.print(
+            "[red]This project has no GitHub repo URL configured.[/red]\n"
+            "Run [bold]cf init[/bold] and set the GitHub repo URL, or update it in the portal."
+        )
+        raise click.Abort()
+    if not project.get("remote_precheck_github_ready"):
+        install_url = (project.get("remote_precheck_github_app_install_url") or "").strip()
+        console.print(
+            "[red]The ChipFoundry GitHub App is not installed on this repository[/red] "
+            "(or the repo URL is wrong)."
+        )
+        if install_url:
+            console.print(f"Install the app here: [cyan]{install_url}[/cyan]")
+            console.print(
+                f"Make sure [bold]{github_repo_url}[/bold] is selected during installation, "
+                "then re-run [bold]cf push --remote[/bold]."
+            )
+        else:
+            console.print("Install it from the project page in the portal, then retry.")
+        raise click.Abort()
+
+    final_project_name = project_name or Path(project_root).name
+
+    if dry_run:
+        console.print("\n[bold]Remote push preview:[/bold]")
+        console.print(f"  Platform project: {project.get('name')} ({platform_id})")
+        console.print(f"  GitHub repo:      {github_repo_url}")
+        console.print(f"  Commit:           {head_sha}")
+        console.print(f"  Via remote ref:   {remote_ref}")
+        console.print(f"  EFS target:       incoming/projects/{final_project_name}/")
+        console.print("  (no files uploaded — dry run)")
+        return
+
+    console.print(f"Asking platform to fetch [cyan]{head_sha[:7]}[/cyan] from {github_repo_url}…")
+    console.print("[dim](large files may take several minutes — please keep this terminal open)[/dim]")
+    try:
+        resp = _api_post(
+            f"/projects/{platform_id}/remote-push",
+            {"commit_sha": head_sha, "project_name": final_project_name},
+            timeout=600.0,
+        )
+    except SystemExit:
+        raise click.Abort()
+
+    landed = resp.get("landed") or []
+    if landed:
+        console.print("[green]✓ Files staged on the platform:[/green]")
+        for rel in landed:
+            console.print(f"  • {rel}")
+    else:
+        console.print("[yellow]⚠ Platform accepted the request but did not report any landed files.[/yellow]")
+
+    try:
+        with open(Path(project_root) / ".cf" / "project.json", "r") as f:
+            pj = json.load(f)
+        _api_put(
+            f"/projects/{platform_id}",
+            {"cli_project_json": _slim_project_json(pj), "cli_sync_source": "push"},
+            timeout=60.0,
+        )
+        console.print("[green]✓ Platform project synced[/green]")
+    except SystemExit:
+        console.print("[yellow]⚠ Remote push succeeded but platform sync failed[/yellow]")
+    except Exception:
+        console.print("[yellow]⚠ Could not read project.json for platform sync[/yellow]")
+
+    if submit:
+        try:
+            _api_post(f"/projects/{platform_id}/submit", {})
+            console.print("[green]✓ Project submitted for review[/green]")
+        except SystemExit:
+            console.print("[yellow]⚠ Submit failed — ensure the project has a name[/yellow]")
+
+
 @main.command('push')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
@@ -1307,8 +1568,17 @@ def gpio_config(project_root, view):
 @click.option('--force-overwrite', is_flag=True, help='Overwrite existing files on SFTP without prompting.')
 @click.option('--dry-run', is_flag=True, help='Preview actions without uploading files.')
 @click.option('--submit', is_flag=True, help='Submit the project for review after upload.')
-def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_name, project_type, force_overwrite, dry_run, submit):
-    """Upload your project files to the ChipFoundry SFTP server."""
+@click.option('--remote', is_flag=True, help='Use the ChipFoundry GitHub App (HTTPS only) instead of SFTP. Useful when port 22 is blocked by a corporate firewall.')
+def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_name, project_type, force_overwrite, dry_run, submit, remote):
+    """Upload your project files to the ChipFoundry SFTP server (or via GitHub with --remote)."""
+    if remote:
+        _push_remote(
+            project_root=project_root,
+            project_name=project_name,
+            dry_run=dry_run,
+            submit=submit,
+        )
+        return
     # If .cf/project.json exists in cwd, use it as default project_root and project_name
     cwd_root, cwd_project_name = get_project_json_from_cwd()
     if not project_root and cwd_root:
@@ -3954,11 +4224,19 @@ def _api_get(path: str):
         client.close()
 
 
-def _api_post(path: str, json_data: dict):
-    """Authenticated POST to the platform API. Returns parsed JSON or raises SystemExit."""
+def _api_post(path: str, json_data: dict, timeout: Optional[float] = None):
+    """Authenticated POST to the platform API. Returns parsed JSON or raises SystemExit.
+
+    `timeout` (seconds) overrides the client default for this request only.
+    Use a large value for long-running endpoints such as remote-push, which
+    waits for the platform to fetch files from GitHub and stage them on EFS.
+    """
     client, _ = _api_client()
     try:
-        resp = client.post(path, json=json_data)
+        kwargs = {"json": json_data}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = client.post(path, **kwargs)
         if resp.status_code == 401:
             console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
             raise SystemExit(1)
@@ -3973,11 +4251,17 @@ def _api_post(path: str, json_data: dict):
         client.close()
 
 
-def _api_put(path: str, json_data: dict):
-    """Authenticated PUT to the platform API. Returns parsed JSON or raises SystemExit."""
+def _api_put(path: str, json_data: dict, timeout: Optional[float] = None):
+    """Authenticated PUT to the platform API. Returns parsed JSON or raises SystemExit.
+
+    `timeout` (seconds) overrides the client default for this request only.
+    """
     client, _ = _api_client()
     try:
-        resp = client.put(path, json=json_data)
+        kwargs = {"json": json_data}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = client.put(path, **kwargs)
         if resp.status_code == 401:
             console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
             raise SystemExit(1)

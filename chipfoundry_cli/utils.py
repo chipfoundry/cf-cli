@@ -1,7 +1,8 @@
 import os
 import shutil
+import subprocess
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Tuple, Any
 import json
 import hashlib
 import paramiko
@@ -24,6 +25,64 @@ GDS_TYPE_MAP = {
     'openframe_project_wrapper.gds': 'openframe',
     'openframe_project_wrapper.gds.gz': 'openframe',
 }
+
+# Canonical GDS wrapper layouts used by remote precheck and remote push.
+# Each entry is (project_kind, base path without suffix). Suffixes below.
+# Keep in sync with chipignite-backend-services/src/precheck_service and
+# sftp-admin/lambda/CreateSftpHomeDirectory.py stage_push_files action.
+GDS_WRAPPER_BASES: Tuple[Tuple[str, str], ...] = (
+    ("analog", "gds/user_analog_project_wrapper"),
+    ("digital", "gds/user_project_wrapper"),
+    ("openframe", "gds/openframe_project_wrapper"),
+)
+GDS_WRAPPER_SUFFIXES: Tuple[str, ...] = (".gds", ".gds.gz")
+
+USER_DEFINES_REL = "verilog/rtl/user_defines.v"
+CF_PROJECT_JSON_REL = ".cf/project.json"
+
+
+def detect_github_repo_url(project_root: str) -> Optional[str]:
+    """
+    Return a normalized https://github.com/owner/repo URL for `origin`, or None.
+
+    Handles HTTPS remotes (with or without .git suffix) and SSH remotes
+    (git@github.com:owner/repo.git). Non-GitHub remotes return None silently
+    so callers can just pre-fill the prompt when a GitHub remote is present.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(project_root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    raw = (r.stdout or "").strip()
+    if not raw:
+        return None
+    m = re.match(r"^git@github\.com:([^/]+)/(.+?)(?:\.git)?$", raw)
+    if m:
+        return f"https://github.com/{m.group(1)}/{m.group(2)}"
+    if raw.startswith(("https://github.com/", "http://github.com/")):
+        cleaned = raw.removesuffix(".git")
+        return cleaned.replace("http://", "https://", 1)
+    return None
+
+
+def get_head_commit_sha(project_root: str) -> Optional[str]:
+    """Return the full commit SHA at HEAD, or None if not a git checkout."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    sha = (r.stdout or "").strip()
+    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None
 
 def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
     """

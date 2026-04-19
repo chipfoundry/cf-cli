@@ -230,14 +230,14 @@ cf logout
 
 - Removes your stored API key from the local config
 
-### Initialize a New Project
+### Initialize or Refresh a Project
 
 ```bash
-cf init [--project-root DIRECTORY]
+cf init [--project-root DIRECTORY] [--shuttle NAME_OR_ID] [--description TEXT]
 ```
 
 > [!IMPORTANT]
-> This command **must be run first** after cloning a repository. It is required before running:
+> Run this first after cloning a repository. It is required before running:
 > - `cf gpio-config`
 > - `cf harden`
 > - `cf precheck`
@@ -247,14 +247,17 @@ cf init [--project-root DIRECTORY]
 > If you skip this step, other commands will show an error directing you to run `cf init` first.
 
 **What it does:**
-- **Smart defaults**: Auto-detects project name from directory and project type from GDS files
-- **Interactive prompts**: Shows detected values in prompts for easy acceptance
-- **Shuttle selection**: Prompts to select an available shuttle (sorted by nearest deadline)
-- **Platform registration**: Creates the project on the platform and links it automatically
-- Creates `.cf/project.json` with project metadata
+- **Idempotent refresh**: Running `cf init` again on an already-linked project pulls in the current platform values, pre-fills prompts, and only PUTs the differences you confirm. The `platform_project_id` link is preserved.
+- **Smart defaults**: Auto-detects project name from directory, project type from GDS files, and GitHub repo URL from your `origin` remote (HTTPS or SSH).
+- **Interactive prompts**:
+  - When a stored value and a detected value match (or only one exists), press Enter to accept it.
+  - When they **differ** (e.g. a stale `github_repo_url` in `.cf/project.json` vs. your current `git remote`), the prompt shows both and Enter accepts the detected value (ground truth). Type `k` or `keep` to keep the current value instead, type a new value to override, or type `clear` to remove the field entirely.
+- **Shuttle selection**: On first init, prompts to select an available shuttle (sorted by nearest deadline).
+- **Platform registration**: Creates the project on the platform and links it automatically.
+- Setting the GitHub repo URL enables `cf precheck --remote` and `cf push --remote`.
 
 > [!NOTE]
-> GDS hash is generated during `push`, not `init`
+> GDS hash is generated during `push`, not `init`.
 
 ### Link an Existing Project
 
@@ -564,17 +567,18 @@ cf verify counter_la --dry-run
 cf push [OPTIONS]
 ```
 
-**Prerequisites:** `cf login`, `cf link` (or `cf init`), `cf config`
+**Prerequisites:** `cf login`, `cf link` (or `cf init`), `cf config` (SFTP mode only).
 
 **Options:**
 - `--project-root`: Specify project directory
-- `--force-overwrite`: Overwrite existing files on SFTP
+- `--force-overwrite`: Overwrite existing files on SFTP (SFTP mode only)
 - `--submit`: Submit the project for review after upload
 - `--dry-run`: Preview what would be uploaded
-- `--sftp-username`: Override configured username
-- `--sftp-key`: Override configured key path
+- `--sftp-username`: Override configured username (SFTP mode only)
+- `--sftp-key`: Override configured key path (SFTP mode only)
+- `--remote`: HTTPS-only upload via the ChipFoundry GitHub App (no SFTP). Use this when port 22 is blocked by your corporate firewall.
 
-**What happens:**
+**SFTP mode (default):**
 1. Verifies the project is linked to the platform and you are logged in
 2. Collects required project files
 3. Auto-detects project type from GDS file
@@ -582,6 +586,29 @@ cf push [OPTIONS]
 5. Uploads files to SFTP with progress bars
 6. Syncs `project.json` data to the platform (GDS hash, version, project ID, slot number)
 7. If `--submit` is used, submits the project for admin review
+
+**Remote (HTTPS) mode — `cf push --remote`:**
+
+Firewall friendly: only outbound HTTPS is needed. The CLI never uploads file
+contents itself; instead, the platform fetches them from your GitHub repo
+via the ChipFoundry GitHub App at your local HEAD commit.
+
+Preconditions:
+- Project has a GitHub repo URL (set via `cf init`, shown in the portal).
+- The ChipFoundry GitHub App is installed on that repo (prompted in the portal).
+- Your local `HEAD` has been pushed to `origin` on some branch (`git push`).
+- Push-critical files at `HEAD` are clean: wrapper GDS, `verilog/rtl/user_defines.v` (when not an openframe project), and `.cf/project.json` (when tracked).
+
+What happens:
+1. `cf push --remote` resolves your local HEAD SHA and checks it is reachable from a remote ref.
+2. Platform uses its GitHub App installation token to read the three push-critical files at that commit and stages them into your SFTP landing zone.
+3. `project.json` is synced to the platform, exactly like an SFTP push.
+4. `--submit` submits for review on success.
+
+> [!TIP]
+> If `cf push` fails to reach `sftp.chipfoundry.io:22` from inside a corporate
+> network, run `cf push --remote` instead. No VPN required — just outbound
+> HTTPS and a GitHub repo linked to the project.
 
 **GDS File Handling:**
 - **Both compressed (`.gz`) and uncompressed (`.gds`) files are supported**

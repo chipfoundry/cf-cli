@@ -226,3 +226,109 @@ def verify_remote_precheck_repo(
             raise RemotePrecheckGitError(
                 f"{rel!r} has uncommitted changes. Commit or stash before remote precheck."
             )
+
+
+class RemotePushGitError(Exception):
+    """Local repository state is not consistent with origin for remote push."""
+
+
+def _head_on_any_remote_ref(repo: Path, head_sha: str) -> Optional[str]:
+    """Return a remote ref name that contains HEAD's commit, or None.
+
+    Uses `git branch -r --contains` so the check passes for any remote branch
+    that has been pushed, without pinning to a single named branch.
+    """
+    r = _run_git(repo, "branch", "-r", "--contains", head_sha)
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        name = line.strip().lstrip("*").strip()
+        if not name or " -> " in name:
+            continue
+        return name
+    return None
+
+
+def _push_critical_paths(repo: Path, project_json: Path) -> Set[str]:
+    """Paths that must be clean at HEAD for a remote push to match local state."""
+    try:
+        kind_gds, gds_rel = _detect_wrapper_gds(repo)
+    except RemotePrecheckGitError as e:
+        # Re-raise under the push error class so the CLI surfaces one consistent
+        # message and can catch a single exception type.
+        raise RemotePushGitError(
+            f"{e} "
+            "Check that the wrapper GDS is committed and located under the "
+            "expected path (e.g. gds/user_project_wrapper.gds, "
+            "gds/openframe_project_wrapper.gds, etc.). If you use Git LFS, "
+            "run `git lfs pull` so the actual file (not the pointer) is present."
+        ) from e
+    out: Set[str] = {gds_rel}
+
+    cf_type = _load_cf_project_type(project_json)
+    if cf_type and cf_type != kind_gds:
+        raise RemotePushGitError(
+            f".cf/project.json type is {cf_type!r} but the wrapper GDS indicates {kind_gds!r}. "
+            "Fix project type or GDS layout before remote push."
+        )
+
+    # user_defines.v is required except for openframe, matching collect_project_files().
+    if kind_gds != "openframe":
+        ud = repo / USER_DEFINES_REL
+        if ud.is_file() or _path_tracked_in_git(repo, USER_DEFINES_REL):
+            out.add(USER_DEFINES_REL)
+
+    if _path_tracked_in_git(repo, CF_PROJECT_JSON_REL):
+        out.add(CF_PROJECT_JSON_REL)
+
+    return out
+
+
+def verify_push_repo(project_root: Path) -> Tuple[str, str]:
+    """
+    Ensure the local checkout is safe for a remote push: HEAD is reachable from
+    a remote branch and the files the platform will fetch are clean at HEAD.
+
+    Returns (head_sha, remote_ref_containing_head).
+    """
+    repo = project_root.resolve()
+    git_marker = repo / ".git"
+    if not (git_marker.is_dir() or git_marker.is_file()):
+        raise RemotePushGitError(
+            "Remote push requires a git checkout with .git "
+            "(clone your GitHub repo rather than using a plain folder copy)."
+        )
+
+    head_sha = _local_head_sha(repo)
+    remote_ref = _head_on_any_remote_ref(repo, head_sha)
+    if not remote_ref:
+        raise RemotePushGitError(
+            f"HEAD ({head_sha[:7]}) is not on any remote ref. "
+            "Push your commits to GitHub (e.g. `git push`) before running `cf push --remote`."
+        )
+
+    project_json = repo / ".cf" / "project.json"
+    critical = _push_critical_paths(repo, project_json)
+
+    dirty = _porcelain_paths(repo)
+    for entry in dirty:
+        if entry.startswith("??"):
+            path = entry[2:]
+            if path in critical:
+                raise RemotePushGitError(
+                    f"{path!r} is untracked but required for remote push. "
+                    "Add and commit it (or remove it) so the remote fetch matches your machine."
+                )
+        elif entry in critical:
+            raise RemotePushGitError(
+                f"{entry!r} has uncommitted changes. Commit and push before remote push."
+            )
+
+    for rel in sorted(critical):
+        r = _run_git(repo, "diff-index", "--quiet", "HEAD", "--", rel)
+        if r.returncode != 0:
+            raise RemotePushGitError(
+                f"{rel!r} has uncommitted changes. Commit and push before remote push."
+            )
+
+    return head_sha, remote_ref
