@@ -1529,6 +1529,7 @@ def _push_remote(project_root: Optional[str], project_name: Optional[str], dry_r
         _api_put(
             f"/projects/{platform_id}",
             {"cli_project_json": _slim_project_json(pj), "cli_sync_source": "push"},
+            timeout=60.0,
         )
         console.print("[green]✓ Platform project synced[/green]")
     except SystemExit:
@@ -4238,11 +4239,17 @@ def _api_post(path: str, json_data: dict, timeout: Optional[float] = None):
         client.close()
 
 
-def _api_put(path: str, json_data: dict):
-    """Authenticated PUT to the platform API. Returns parsed JSON or raises SystemExit."""
+def _api_put(path: str, json_data: dict, timeout: Optional[float] = None):
+    """Authenticated PUT to the platform API. Returns parsed JSON or raises SystemExit.
+
+    `timeout` (seconds) overrides the client default for this request only.
+    """
     client, _ = _api_client()
     try:
-        resp = client.put(path, json=json_data)
+        kwargs = {"json": json_data}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = client.put(path, **kwargs)
         if resp.status_code == 401:
             console.print("[red]✗ API key is invalid or expired.[/red] Run [bold]cf login[/bold] to re-authenticate.")
             raise SystemExit(1)
