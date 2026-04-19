@@ -309,26 +309,54 @@ def keyview():
     _print_manual_key_instructions()
 
 def _prompt_with_default(label: str, current: Optional[str], detected: Optional[str] = None) -> Optional[str]:
-    """Interactive prompt that preserves `current` on blank input.
+    """Interactive prompt with sensible defaults for current/detected values.
 
-    - Enter = keep current (or accept detected when no current).
-    - Type a value = new value.
-    - Type 'clear' = explicitly remove the value (returns None).
-    Returned value is stripped. `clear` is case-insensitive.
+    Behavior:
+    - No current, no detected: Enter leaves the value unset (None).
+    - Only current:            Enter keeps current.
+    - Only detected:           Enter accepts detected.
+    - Current == detected:     Enter accepts the (single) value.
+    - Current != detected:     Enter accepts `detected` (ground truth, e.g. git
+                               remote). Type `k` or `keep` to keep current.
+    Any typed value becomes the new value. `clear` (case-insensitive) explicitly
+    removes the value (returns None).
     """
-    effective_default = current if current else detected
-    hint_parts = []
-    if current:
-        hint_parts.append(f"current: [cyan]{current}[/cyan]")
-    if detected and detected != current:
-        hint_parts.append(f"detected: [cyan]{detected}[/cyan]")
-    hint_parts.append("blank=keep, 'clear'=remove")
-    hint = ", ".join(hint_parts)
-    raw = console.input(f"{label} ({hint}): ").strip()
+    normalized_current = current.strip() if isinstance(current, str) and current.strip() else None
+    normalized_detected = detected.strip() if isinstance(detected, str) and detected.strip() else None
+    conflict = (
+        normalized_current is not None
+        and normalized_detected is not None
+        and normalized_current != normalized_detected
+    )
+
+    if conflict:
+        effective_default = normalized_detected
+    elif normalized_detected is not None:
+        effective_default = normalized_detected
+    else:
+        effective_default = normalized_current
+
+    console.print(f"[bold]{label}[/bold]")
+    if normalized_current:
+        console.print(f"  current:  [cyan]{normalized_current}[/cyan]")
+    if normalized_detected and normalized_detected != normalized_current:
+        console.print(f"  detected: [cyan]{normalized_detected}[/cyan]")
+
+    if conflict:
+        hint = "enter=use detected, k=keep current, clear=remove, or type new value"
+    elif effective_default:
+        hint = "enter=accept, clear=remove, or type new value"
+    else:
+        hint = "enter=skip, or type value"
+
+    raw = console.input(f"  [dim]{hint}[/dim]: ").strip()
     if raw == "":
         return effective_default
-    if raw.lower() == "clear":
+    lowered = raw.lower()
+    if lowered == "clear":
         return None
+    if conflict and lowered in ("k", "keep"):
+        return normalized_current
     return raw
 
 

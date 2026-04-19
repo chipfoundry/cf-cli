@@ -249,7 +249,9 @@ cf init [--project-root DIRECTORY] [--shuttle NAME_OR_ID] [--description TEXT]
 **What it does:**
 - **Idempotent refresh**: Running `cf init` again on an already-linked project pulls in the current platform values, pre-fills prompts, and only PUTs the differences you confirm. The `platform_project_id` link is preserved.
 - **Smart defaults**: Auto-detects project name from directory, project type from GDS files, and GitHub repo URL from your `origin` remote (HTTPS or SSH).
-- **Interactive prompts**: Blank input keeps the current/detected value; type `clear` to explicitly remove a field.
+- **Interactive prompts**:
+  - When a stored value and a detected value match (or only one exists), press Enter to accept it.
+  - When they **differ** (e.g. a stale `github_repo_url` in `.cf/project.json` vs. your current `git remote`), the prompt shows both and Enter accepts the detected value (ground truth). Type `k` or `keep` to keep the current value instead, type a new value to override, or type `clear` to remove the field entirely.
 - **Shuttle selection**: On first init, prompts to select an available shuttle (sorted by nearest deadline).
 - **Platform registration**: Creates the project on the platform and links it automatically.
 - Setting the GitHub repo URL enables `cf precheck --remote` and `cf push --remote`.
