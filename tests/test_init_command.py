@@ -43,7 +43,7 @@ class TestInitCommand:
         result = runner.invoke(main, ['init', '--help'])
         
         assert result.exit_code == 0
-        assert 'Initialize a new ChipFoundry project' in result.output
+        assert 'Initialize or refresh the local ChipFoundry project configuration' in result.output
         assert '--project-root' in result.output
     
     def test_init_with_project_root(self, temp_project_dir):

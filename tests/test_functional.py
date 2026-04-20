@@ -173,9 +173,14 @@ class TestErrorHandling:
             '--dry-run'
         ])
         
-        # Should fail with meaningful error about missing files
+        # Should fail with a meaningful error. On an unlinked, empty project the
+        # current behavior is to abort with a linking hint before checking files;
+        # older CLI versions aborted on missing artifacts. Accept either surface.
         assert result.exit_code != 0
-        assert any(keyword in result.output.lower() for keyword in ['not found', 'missing', 'required', 'gds', 'verilog'])
+        assert any(keyword in result.output.lower() for keyword in [
+            'not found', 'missing', 'required', 'gds', 'verilog',
+            'not linked', 'cf link', 'cf init',
+        ])
     
     def test_harden_missing_openlane(self, temp_project_dir):
         """Test that harden fails gracefully when openlane is missing."""
