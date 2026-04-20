@@ -1,5 +1,6 @@
 """Tests for remote precheck git consistency checks."""
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -8,8 +9,26 @@ import pytest
 from chipfoundry_cli.remote_precheck_git import RemotePrecheckGitError, verify_remote_precheck_repo
 
 
+# CI runners do not have a global git identity configured. Inject one via env
+# so `git commit` in these throwaway repos never fails with "please tell me who
+# you are" (exit 128). Keeping it in env (not --global config) avoids mutating
+# the developer's machine when running the suite locally.
+_GIT_ENV = {
+    **os.environ,
+    "GIT_AUTHOR_NAME": "cf-cli-test",
+    "GIT_AUTHOR_EMAIL": "cf-cli-test@example.invalid",
+    "GIT_COMMITTER_NAME": "cf-cli-test",
+    "GIT_COMMITTER_EMAIL": "cf-cli-test@example.invalid",
+}
+
+
 def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+        env=_GIT_ENV,
+    )
 
 
 def _init_digital_project(work: Path) -> None:

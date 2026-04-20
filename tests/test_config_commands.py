@@ -19,7 +19,7 @@ class TestConfigCommand:
         result = runner.invoke(main, ['config', '--help'])
         
         assert result.exit_code == 0
-        assert 'Configure user-level SFTP credentials' in result.output
+        assert 'Configure a custom SSH private key path for SFTP access' in result.output
 
 
 class TestKeygenCommand:

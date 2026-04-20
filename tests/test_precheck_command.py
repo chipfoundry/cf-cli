@@ -37,6 +37,22 @@ class TestPrecheckCommand:
         assert '--dry-run' in result.output
         assert '--poll' in result.output
         assert '--wait-timeout' in result.output
+        assert '--list-checks' in result.output
+        assert 'Available checks' in result.output
+        assert 'topcell_check' in result.output
+        assert 'lvs' in result.output
+
+    def test_precheck_list_checks(self):
+        """--list-checks prints all known check refs and exits cleanly."""
+        from chipfoundry_cli.check_refs import PRECHECK_CHECKS
+
+        runner = CliRunner()
+        result = runner.invoke(main, ['precheck', '--list-checks'])
+
+        assert result.exit_code == 0
+        for check in PRECHECK_CHECKS:
+            assert check.ref in result.output
+        assert 'opt-in' in result.output
     
     def test_precheck_dry_run(self, temp_project_dir):
         """Test precheck command with --dry-run flag."""

@@ -15,7 +15,7 @@ class TestStatusCommand:
         result = runner.invoke(main, ['status', '--help'])
         
         assert result.exit_code == 0
-        assert 'Show all projects and outputs' in result.output
+        assert 'Show project status' in result.output
         assert '--sftp-host' in result.output
         assert '--sftp-username' in result.output
         assert '--sftp-key' in result.output
