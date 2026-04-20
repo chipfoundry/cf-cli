@@ -1,7 +1,9 @@
 import click
 import getpass
 from typing import Optional, List
+from chipfoundry_cli.check_refs import PRECHECK_CHECKS
 from chipfoundry_cli.remote_precheck_git import RemotePrecheckGitError, verify_remote_precheck_repo
+from chipfoundry_cli.version_check import maybe_warn_outdated
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
@@ -174,7 +176,16 @@ def check_project_initialized(project_root_path: Path, command_name: str, dry_ru
 @click.group(help="ChipFoundry CLI: Automate project submission and management.")
 @click.version_option(importlib.metadata.version("chipfoundry-cli"), "-v", "--version", message="%(version)s")
 def main():
-    pass
+    # Best-effort upgrade check. Cached on disk for CACHE_TTL_SECONDS and
+    # guarded by a short timeout so it never slows down a command. Runs
+    # only when a subcommand was dispatched — `cf --version` / `cf --help`
+    # exit before this callback fires.
+    try:
+        current = importlib.metadata.version("chipfoundry-cli")
+        maybe_warn_outdated(current, _get_api_url(), console, user_agent=_cf_user_agent())
+    except Exception:
+        # Never let a version-check issue break the actual command.
+        pass
 
 @main.command('config')
 def config_cmd():
@@ -3553,11 +3564,62 @@ def _upload_precheck_results(project_json_path: Path):
         console.print("[yellow]⚠ Precheck results could not be synced to platform[/yellow]")
 
 
-@main.command('precheck')
+def _print_precheck_checks() -> None:
+    """Print the list of available precheck checks as a table."""
+    table = Table(title="Available cf-precheck checks", show_lines=False)
+    table.add_column("Ref", style="cyan", no_wrap=True)
+    table.add_column("Name", style="white")
+    table.add_column("Default", style="green")
+    for c in PRECHECK_CHECKS:
+        default = "opt-in" if c.optional else "on"
+        table.add_row(c.ref, c.surname, default)
+    console.print(table)
+    console.print(
+        "\n[dim]Use [bold]--checks REF[/bold] to run only specific checks, "
+        "[bold]--skip-checks REF[/bold] to skip, or [bold]--magic-drc[/bold] "
+        "to include the optional Magic DRC check.[/dim]"
+    )
+
+
+def _build_precheck_help() -> str:
+    """Build the --help text, including the list of available checks."""
+    lines = [
+        "Run precheck validation on the project.",
+        "",
+        "This runs the cf-precheck tool to validate your design before submission.",
+        "",
+        "\b",
+        "Examples:",
+        "    cf precheck                              # Run all checks",
+        "    cf precheck --list-checks                # List available checks and exit",
+        "    cf precheck --skip-checks lvs            # Skip LVS check",
+        "    cf precheck --magic-drc                  # Include optional Magic DRC",
+        "    cf precheck --checks topcell_check       # Run specific checks only",
+        "    cf precheck --remote                     # Queue on platform; exit when accepted",
+        "    cf precheck --remote --poll              # Wait and stream progress",
+        "    cf precheck --remote --poll --wait-timeout 0    # Poll until done (no time limit)",
+        "",
+        "\b",
+        "Available checks (pass to --checks / --skip-checks):",
+    ]
+    for c in PRECHECK_CHECKS:
+        suffix = "  (optional; opt in via --magic-drc)" if c.optional else ""
+        lines.append(f"    {c.ref}{suffix}")
+    lines += [
+        "",
+        "Remote precheck requires your local HEAD to match origin for --git-ref, and",
+        "precheck inputs (wrapper GDS, verilog/rtl/user_defines.v when the GPIO check",
+        "runs, and tracked .cf/project.json) to match that commit.",
+    ]
+    return "\n".join(lines)
+
+
+@main.command('precheck', help=_build_precheck_help())
 @click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
-@click.option('--skip-checks', multiple=True, help='Checks to skip (can be specified multiple times)')
+@click.option('--skip-checks', multiple=True, help='Checks to skip (repeatable). See --list-checks for valid refs.')
 @click.option('--magic-drc', is_flag=True, help='Include Magic DRC check (optional, off by default)')
-@click.option('--checks', multiple=True, help='Specific checks to run (can be specified multiple times)')
+@click.option('--checks', multiple=True, help='Specific checks to run (repeatable). See --list-checks for valid refs.')
+@click.option('--list-checks', 'list_checks', is_flag=True, help='List the available precheck checks and exit.')
 @click.option('--dry-run', is_flag=True, help='Show the command without running')
 @click.option('--remote', is_flag=True, help='Queue precheck on the ChipFoundry platform (requires cf login + linked project)')
 @click.option(
@@ -3573,25 +3635,10 @@ def _upload_precheck_results(project_json_path: Path):
     show_default=True,
     help='With --remote --poll: max seconds to wait (0 = no limit). Ignored without --poll.',
 )
-def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, poll, git_ref, wait_timeout):
-    """Run precheck validation on the project.
-    
-    This runs the cf-precheck tool to validate your design before
-    submission.
-    
-    Examples:
-        cf precheck                              # Run all checks
-        cf precheck --skip-checks lvs            # Skip LVS check
-        cf precheck --magic-drc                  # Include optional Magic DRC
-        cf precheck --checks topcell_check       # Run specific checks only
-        cf precheck --remote                     # Queue on platform; exit when accepted
-        cf precheck --remote --poll              # Wait and stream progress
-        cf precheck --remote --poll --wait-timeout 0    # Poll until done (no time limit)
-
-    Remote precheck requires your local HEAD to match origin for --git-ref, and precheck
-    inputs (wrapper GDS, verilog/rtl/user_defines.v when the GPIO check runs, and tracked
-    .cf/project.json) to match that commit.
-    """
+def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run, remote, poll, git_ref, wait_timeout):
+    if list_checks:
+        _print_precheck_checks()
+        return
     cwd_root, _ = get_project_json_from_cwd()
     if not project_root and cwd_root:
         project_root = cwd_root
@@ -3659,7 +3706,10 @@ def precheck(project_root, skip_checks, magic_drc, checks, dry_run, remote, poll
         api_url = _get_api_url()
         client = httpx_remote.Client(
             base_url=f"{api_url}/api/v1",
-            headers={'Authorization': f'Bearer {api_key}'},
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'User-Agent': _cf_user_agent(),
+            },
             timeout=120.0,
         )
         try:
@@ -4174,6 +4224,24 @@ DEFAULT_API_URL = 'https://api.chipfoundry.io'
 PORTAL_BASE_URL = 'https://platform.chipfoundry.io'
 
 
+def _cf_user_agent() -> str:
+    """User-Agent string for platform requests.
+
+    Format: ``chipfoundry-cli/<cli-version> python/<py-version> <platform>``.
+    Lets the backend track which CLI versions are in the wild without a
+    dedicated telemetry endpoint.
+    """
+    import platform as _platform
+
+    try:
+        cli_version = importlib.metadata.version("chipfoundry-cli")
+    except importlib.metadata.PackageNotFoundError:
+        cli_version = "unknown"
+    py = _platform.python_version()
+    system = f"{_platform.system().lower()}-{_platform.machine().lower()}"
+    return f"chipfoundry-cli/{cli_version} python/{py} {system}"
+
+
 def _get_api_url() -> str:
     config = load_user_config()
     return config.get('api_url', DEFAULT_API_URL)
@@ -4199,7 +4267,10 @@ def _api_client():
     api_url = _get_api_url()
     client = httpx.Client(
         base_url=f"{api_url}/api/v1",
-        headers={'Authorization': f'Bearer {api_key}'},
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'User-Agent': _cf_user_agent(),
+        },
         timeout=15,
     )
     return client, api_url
@@ -4435,7 +4506,11 @@ def login_cmd(test):
     console.print(f"Opening browser to authenticate with [bold]{api_url}[/bold]...\n")
 
     try:
-        resp = httpx.post(f"{api_url}/api/v1/auth/cli/sessions", timeout=10)
+        resp = httpx.post(
+            f"{api_url}/api/v1/auth/cli/sessions",
+            headers={'User-Agent': _cf_user_agent()},
+            timeout=10,
+        )
         resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPError as e:
@@ -4457,7 +4532,11 @@ def login_cmd(test):
     for _ in range(max_polls):
         time.sleep(poll_interval)
         try:
-            poll_resp = httpx.get(poll_url, timeout=10)
+            poll_resp = httpx.get(
+                poll_url,
+                headers={'User-Agent': _cf_user_agent()},
+                timeout=10,
+            )
             poll_resp.raise_for_status()
             poll_data = poll_resp.json()
         except httpx.HTTPError:
@@ -4528,7 +4607,10 @@ def whoami_cmd():
     try:
         resp = httpx.get(
             f"{api_url}/api/v1/auth/cli/whoami",
-            headers={'Authorization': f'Bearer {api_key}'},
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'User-Agent': _cf_user_agent(),
+            },
             timeout=10,
         )
         if resp.status_code == 401:
