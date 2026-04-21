@@ -205,16 +205,33 @@ def config_cmd():
 def _try_register_ssh_key(public_key: str) -> bool:
     """Attempt to register the SSH public key on the user's platform profile.
 
-    Returns True if the key was registered successfully, False otherwise.
+    Calls the CLI-specific ``PUT /auth/cli/ssh-key`` endpoint so the request
+    stays on the public API surface. Returns True on success, False otherwise.
+    Errors are swallowed silently so the caller can print the manual-registration
+    fallback without a scary ``API request failed`` line first.
     """
+    import httpx as _httpx
+
     config = load_user_config()
     if not config.get("api_key"):
         return False
+
     try:
-        _api_put("/users/me", {"ssh_public_key": public_key})
-        return True
+        client, _ = _api_client()
     except SystemExit:
         return False
+    try:
+        resp = client.put("/auth/cli/ssh-key", json={"ssh_public_key": public_key})
+        if resp.status_code == 200:
+            return True
+        return False
+    except _httpx.HTTPError:
+        return False
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def _print_manual_key_instructions():
