@@ -1,6 +1,7 @@
 import click
 import getpass
-from typing import Optional, List
+import hashlib
+from typing import Optional, List, Tuple
 from chipfoundry_cli.check_refs import PRECHECK_CHECKS
 from chipfoundry_cli.remote_precheck_git import RemotePrecheckGitError, verify_remote_precheck_repo
 from chipfoundry_cli.version_check import maybe_warn_outdated
@@ -1572,6 +1573,233 @@ def _push_remote(project_root: Optional[str], project_name: Optional[str], dry_r
             console.print("[yellow]⚠ Submit failed — ensure the project has a name[/yellow]")
 
 
+def _sha256_file(path: Path) -> str:
+    """SHA-256 of a file streamed in 4 KiB chunks.
+
+    Must match the shuttle importer and the Lambda side so the server can
+    verify the upload byte-for-byte.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, str]]:
+    """Return [(rel_path, abs_path, size, kind)] for files the platform
+    accepts via --https.
+
+    Picks exactly one wrapper GDS (analog/digital/openframe) and, for
+    non-openframe projects, ``verilog/rtl/user_defines.v`` if it exists.
+    Raises FileNotFoundError if no wrapper is present or
+    ValueError if multiple are.
+    """
+    from chipfoundry_cli.utils import GDS_WRAPPER_BASES, GDS_WRAPPER_SUFFIXES, USER_DEFINES_REL
+
+    hits: List[Tuple[str, str]] = []
+    for kind, base in GDS_WRAPPER_BASES:
+        for suf in GDS_WRAPPER_SUFFIXES:
+            rel = base + suf
+            if (project_root / rel).is_file():
+                hits.append((kind, rel))
+                break
+    if not hits:
+        raise FileNotFoundError(
+            "No wrapper GDS found (expected one of gds/user_project_wrapper.gds[.gz], "
+            "gds/user_analog_project_wrapper.gds[.gz], "
+            "gds/openframe_project_wrapper.gds[.gz])."
+        )
+    if len(hits) > 1:
+        paths = ", ".join(h[1] for h in hits)
+        raise ValueError(
+            f"Multiple wrapper GDS layouts present ({paths}). Keep only one."
+        )
+
+    kind, wrapper_rel = hits[0]
+    abs_wrapper = project_root / wrapper_rel
+    results: List[Tuple[str, Path, int, str]] = [
+        (wrapper_rel, abs_wrapper, abs_wrapper.stat().st_size, "wrapper")
+    ]
+
+    if kind != "openframe":
+        ud = project_root / USER_DEFINES_REL
+        if ud.is_file():
+            results.append((USER_DEFINES_REL, ud, ud.stat().st_size, "aux"))
+
+    return results
+
+
+def _push_https(project_root: Optional[str], project_name: Optional[str], dry_run: bool, submit: bool) -> None:
+    """Push project files to the platform by uploading directly to S3 over HTTPS.
+
+    Use case: customers whose network blocks BOTH SFTP (port 22) and
+    GitHub, so they cannot use `cf push` or `cf push --remote`. They can
+    still reach AWS S3 over HTTPS, which is what the backend hands them
+    via pre-signed PUT URLs.
+
+    No Git involvement at all — the CLI hashes the local files, the
+    backend returns pre-signed URLs, the CLI PUTs directly to S3, and
+    the platform stages the objects onto EFS with the same synthesized
+    .cf/project.json the --remote flow produces.
+    """
+    cwd_root, cwd_project_name = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_name and cwd_project_name:
+        project_name = cwd_project_name
+    if not project_root:
+        console.print(
+            "[red]No project root specified and no .cf/project.json found in current directory.[/red]"
+        )
+        console.print("Provide --project-root or run from a linked project.")
+        raise click.Abort()
+    project_root = str(Path(project_root).resolve())
+
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id:
+        console.print("[red]Project is not linked to the platform.[/red]")
+        console.print("Run [bold]cf link[/bold] to connect this project, or [bold]cf init[/bold] to create a new one.")
+        raise click.Abort()
+
+    config = load_user_config()
+    if not config.get("api_key"):
+        console.print("[red]Not logged in.[/red] Run [bold]cf login[/bold] before using --https.")
+        raise click.Abort()
+
+    try:
+        candidates = _collect_push_candidates(Path(project_root))
+    except FileNotFoundError as e:
+        console.print(f"[red]HTTPS push not ready:[/red] {e}")
+        raise click.Abort()
+    except ValueError as e:
+        console.print(f"[red]HTTPS push not ready:[/red] {e}")
+        raise click.Abort()
+
+    final_project_name = project_name or Path(project_root).name
+
+    total_bytes = sum(c[2] for c in candidates)
+    mb = total_bytes / (1024 * 1024)
+    console.print(
+        f"[green]✓ Ready to upload[/green] [cyan]{len(candidates)}[/cyan] file(s) "
+        f"([cyan]{mb:.1f} MiB[/cyan] total) to the platform over HTTPS."
+    )
+
+    if dry_run:
+        console.print("\n[bold]HTTPS push preview:[/bold]")
+        console.print(f"  Platform project: {platform_id}")
+        console.print(f"  Project name:     {final_project_name}")
+        for rel, abs_path, size, _ in candidates:
+            console.print(f"  • {rel} ({size / (1024 * 1024):.1f} MiB)")
+        console.print("  (no files uploaded — dry run)")
+        return
+
+    console.print("[dim]Hashing files locally…[/dim]")
+    hashed: List[dict] = []
+    for rel, abs_path, size, _ in candidates:
+        digest = _sha256_file(abs_path)
+        hashed.append({"rel_path": rel, "size": size, "sha256": digest})
+        console.print(f"  [dim]sha256[/dim] {digest[:16]}…  {rel}")
+
+    console.print("Requesting upload slots from the platform…")
+    try:
+        init_resp = _api_post(
+            f"/projects/{platform_id}/https-push/init",
+            {"project_name": final_project_name, "files": hashed},
+            timeout=60.0,
+        )
+    except SystemExit:
+        raise click.Abort()
+
+    upload_id = init_resp.get("upload_id") or ""
+    put_targets = {f["rel_path"]: f["put_url"] for f in (init_resp.get("files") or [])}
+    if not upload_id or len(put_targets) != len(candidates):
+        console.print("[red]✗ Platform did not return upload slots for every file.[/red]")
+        raise click.Abort()
+
+    console.print(
+        f"[dim]Upload id [bold]{upload_id[:8]}[/bold] — uploading to "
+        f"{init_resp.get('bucket')} (HTTPS, {init_resp.get('expires_in', 3600)}s TTL)…[/dim]"
+    )
+
+    # Per-file single PUT. We reuse one httpx client with a generous
+    # timeout; the signed URL carries auth so no headers besides
+    # x-amz-server-side-encryption are required.
+    import httpx
+
+    put_timeout = httpx.Timeout(connect=10.0, read=1800.0, write=1800.0, pool=30.0)
+    with httpx.Client(timeout=put_timeout) as put_client:
+        for rel, abs_path, size, _ in candidates:
+            url = put_targets[rel]
+            console.print(
+                f"  [cyan]↑[/cyan] {rel}  [dim]({size / (1024 * 1024):.1f} MiB)…[/dim]"
+            )
+            try:
+                with open(abs_path, "rb") as fh:
+                    resp = put_client.put(
+                        url,
+                        content=fh,
+                        headers={
+                            "Content-Type": "application/octet-stream",
+                            "x-amz-server-side-encryption": "AES256",
+                        },
+                    )
+                if resp.status_code >= 300:
+                    body = resp.text[:300]
+                    console.print(
+                        f"[red]✗ Upload of {rel} failed: HTTP {resp.status_code} — {body}[/red]"
+                    )
+                    raise click.Abort()
+            except click.Abort:
+                raise
+            except Exception as e:
+                console.print(f"[red]✗ Upload of {rel} failed: {type(e).__name__}: {e}[/red]")
+                raise click.Abort()
+
+    console.print("[green]✓ All files uploaded. Asking platform to stage them on EFS…[/green]")
+    try:
+        complete_resp = _api_post(
+            f"/projects/{platform_id}/https-push/complete",
+            {"upload_id": upload_id, "project_name": final_project_name},
+            timeout=600.0,
+        )
+    except SystemExit:
+        raise click.Abort()
+
+    landed = complete_resp.get("landed") or []
+    if landed:
+        console.print("[green]✓ Files staged on the platform:[/green]")
+        for rel in landed:
+            console.print(f"  • {rel}")
+    else:
+        console.print("[yellow]⚠ Platform accepted the request but did not report any landed files.[/yellow]")
+
+    try:
+        with open(Path(project_root) / ".cf" / "project.json", "r") as f:
+            pj = json.load(f)
+        _api_put(
+            f"/projects/{platform_id}",
+            {"cli_project_json": _slim_project_json(pj), "cli_sync_source": "push"},
+            timeout=60.0,
+        )
+        console.print("[green]✓ Platform project synced[/green]")
+    except FileNotFoundError:
+        # .cf/project.json is synthesized server-side now; we still PUT the
+        # local copy if present for UX parity, but it's not required.
+        pass
+    except SystemExit:
+        console.print("[yellow]⚠ HTTPS push succeeded but platform sync failed[/yellow]")
+    except Exception:
+        console.print("[yellow]⚠ Could not read project.json for platform sync[/yellow]")
+
+    if submit:
+        try:
+            _api_post(f"/projects/{platform_id}/submit", {})
+            console.print("[green]✓ Project submitted for review[/green]")
+        except SystemExit:
+            console.print("[yellow]⚠ Submit failed — ensure the project has a name[/yellow]")
+
+
 @main.command('push')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
@@ -1584,8 +1812,25 @@ def _push_remote(project_root: Optional[str], project_name: Optional[str], dry_r
 @click.option('--dry-run', is_flag=True, help='Preview actions without uploading files.')
 @click.option('--submit', is_flag=True, help='Submit the project for review after upload.')
 @click.option('--remote', is_flag=True, help='Use the ChipFoundry GitHub App (HTTPS only) instead of SFTP. Useful when port 22 is blocked by a corporate firewall.')
-def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_name, project_type, force_overwrite, dry_run, submit, remote):
-    """Upload your project files to the ChipFoundry SFTP server (or via GitHub with --remote)."""
+@click.option('--https', 'https_mode', is_flag=True, help='Upload files directly over HTTPS (via S3 pre-signed URLs). Useful when both SFTP and GitHub are blocked.')
+def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_name, project_type, force_overwrite, dry_run, submit, remote, https_mode):
+    """Upload your project files to the ChipFoundry SFTP server.
+
+    Defaults to SFTP. Use --remote to push via the ChipFoundry GitHub App
+    (HTTPS), or --https to upload directly to AWS S3 (also HTTPS) without
+    needing Git. The two HTTPS modes are mutually exclusive.
+    """
+    if remote and https_mode:
+        console.print("[red]--remote and --https are mutually exclusive.[/red]")
+        raise click.Abort()
+    if https_mode:
+        _push_https(
+            project_root=project_root,
+            project_name=project_name,
+            dry_run=dry_run,
+            submit=submit,
+        )
+        return
     if remote:
         _push_remote(
             project_root=project_root,

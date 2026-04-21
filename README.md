@@ -577,6 +577,7 @@ cf push [OPTIONS]
 - `--sftp-username`: Override configured username (SFTP mode only)
 - `--sftp-key`: Override configured key path (SFTP mode only)
 - `--remote`: HTTPS-only upload via the ChipFoundry GitHub App (no SFTP). Use this when port 22 is blocked by your corporate firewall.
+- `--https`: HTTPS-only direct upload to AWS S3 (no SFTP, no GitHub). Use this when both SFTP and GitHub are blocked by your corporate firewall.
 
 **SFTP mode (default):**
 1. Verifies the project is linked to the platform and you are logged in
@@ -609,6 +610,34 @@ What happens:
 > If `cf push` fails to reach `sftp.chipfoundry.io:22` from inside a corporate
 > network, run `cf push --remote` instead. No VPN required — just outbound
 > HTTPS and a GitHub repo linked to the project.
+
+**HTTPS direct mode — `cf push --https`:**
+
+Firewall-friendliest fallback: no SFTP, no GitHub, no Git at all. The CLI
+uploads your push-critical files directly to an AWS S3 staging bucket over
+HTTPS using short-lived pre-signed PUT URLs, then the platform stages the
+objects onto your SFTP landing zone. Use this when your network blocks
+both port 22 and GitHub.
+
+Preconditions:
+- Project is linked to the platform (`cf init` or `cf link`) and you are logged in.
+- Wrapper GDS exists locally under `gds/` (one of `user_project_wrapper.gds[.gz]`,
+  `user_analog_project_wrapper.gds[.gz]`, `openframe_project_wrapper.gds[.gz]`).
+- For non-openframe projects, `verilog/rtl/user_defines.v` is also uploaded when present.
+- Outbound HTTPS to `*.s3.us-east-2.amazonaws.com` is allowed.
+
+What happens:
+1. `cf push --https` picks the wrapper GDS (and `user_defines.v` if applicable) and hashes each file with SHA-256 locally.
+2. Platform returns one pre-signed PUT URL per file; the CLI PUTs each file directly to S3 over HTTPS.
+3. Platform stages the objects onto your SFTP landing zone, re-verifying SHA-256 byte-for-byte and synthesizing `.cf/project.json` from the authoritative platform data.
+4. Staged S3 objects are deleted on success; any leftovers are expired by the bucket lifecycle after 7 days.
+5. `--submit` submits for review on success.
+
+> [!TIP]
+> Try modes in this order: `cf push` → `cf push --remote` → `cf push --https`.
+> The SFTP mode is fastest when unrestricted, `--remote` is the best HTTPS
+> option when you already keep the project on GitHub, and `--https` is the
+> "direct upload" escape hatch that works even with no Git.
 
 **GDS File Handling:**
 - **Both compressed (`.gz`) and uncompressed (`.gds`) files are supported**
