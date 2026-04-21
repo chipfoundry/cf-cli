@@ -1725,36 +1725,66 @@ def _push_https(project_root: Optional[str], project_name: Optional[str], dry_ru
     # Per-file single PUT. We reuse one httpx client with a generous
     # timeout; the signed URL carries auth so no headers besides
     # x-amz-server-side-encryption are required.
+    #
+    # We stream the body with a generator instead of passing the file
+    # directly so we can drive a rich progress bar (matches the UX of
+    # the SFTP push path in utils.upload_with_progress). Content-Length
+    # is set explicitly so S3 doesn't fall back to chunked encoding,
+    # which pre-signed PUTs don't allow.
     import httpx
+    from rich.progress import DownloadColumn, TransferSpeedColumn
 
     put_timeout = httpx.Timeout(connect=10.0, read=1800.0, write=1800.0, pool=30.0)
+    chunk_size = 1024 * 1024  # 1 MiB — big enough to keep overhead low, small enough for smooth bar updates
     with httpx.Client(timeout=put_timeout) as put_client:
         for rel, abs_path, size, _ in candidates:
             url = put_targets[rel]
-            console.print(
-                f"  [cyan]↑[/cyan] {rel}  [dim]({size / (1024 * 1024):.1f} MiB)…[/dim]"
-            )
-            try:
-                with open(abs_path, "rb") as fh:
+            with Progress(
+                TextColumn("  [cyan]↑[/cyan] [progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False,
+            ) as progress:
+                task = progress.add_task(rel, total=max(size, 1))
+                if size == 0:
+                    # httpx won't call our generator for an empty body;
+                    # advance the bar manually so the user sees it complete.
+                    progress.update(task, completed=1)
+
+                def _body_iter(path=abs_path, tid=task, prog=progress):
+                    with open(path, "rb") as fh:
+                        while True:
+                            buf = fh.read(chunk_size)
+                            if not buf:
+                                break
+                            prog.update(tid, advance=len(buf))
+                            yield buf
+
+                try:
                     resp = put_client.put(
                         url,
-                        content=fh,
+                        content=_body_iter() if size > 0 else b"",
                         headers={
                             "Content-Type": "application/octet-stream",
+                            "Content-Length": str(size),
                             "x-amz-server-side-encryption": "AES256",
                         },
                     )
-                if resp.status_code >= 300:
-                    body = resp.text[:300]
-                    console.print(
-                        f"[red]✗ Upload of {rel} failed: HTTP {resp.status_code} — {body}[/red]"
-                    )
+                    if resp.status_code >= 300:
+                        body = resp.text[:300]
+                        console.print(
+                            f"[red]✗ Upload of {rel} failed: HTTP {resp.status_code} — {body}[/red]"
+                        )
+                        raise click.Abort()
+                except click.Abort:
+                    raise
+                except Exception as e:
+                    console.print(f"[red]✗ Upload of {rel} failed: {type(e).__name__}: {e}[/red]")
                     raise click.Abort()
-            except click.Abort:
-                raise
-            except Exception as e:
-                console.print(f"[red]✗ Upload of {rel} failed: {type(e).__name__}: {e}[/red]")
-                raise click.Abort()
 
     console.print("[green]✓ All files uploaded. Asking platform to stage them on EFS…[/green]")
     try:
