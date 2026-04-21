@@ -4551,8 +4551,39 @@ def _api_client():
     return client, api_url
 
 
+def _format_api_error(resp) -> str:
+    """Build a user-friendly error message from a platform error response.
+
+    FastAPI returns errors as `{"detail": "..."}` (or a list of validation
+    errors). Surfacing that instead of the bare `Client error '409 Conflict'`
+    lets users act on the real reason without tailing backend logs.
+    """
+    status = resp.status_code
+    try:
+        body = resp.json()
+    except Exception:
+        snippet = (resp.text or "").strip()
+        if snippet:
+            return f"HTTP {status}: {snippet[:300]}"
+        return f"HTTP {status}"
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail:
+        return f"HTTP {status}: {detail}"
+    if isinstance(detail, list) and detail:
+        parts = []
+        for item in detail:
+            if isinstance(item, dict):
+                loc = ".".join(str(p) for p in (item.get("loc") or [])[-2:])
+                msg = item.get("msg") or ""
+                parts.append(f"{loc}: {msg}" if loc else msg)
+        if parts:
+            return f"HTTP {status}: {'; '.join(parts)}"
+    return f"HTTP {status}: {body}"
+
+
 def _api_get(path: str):
     """Authenticated GET to the platform API. Returns parsed JSON or raises SystemExit."""
+    import httpx as _httpx
     client, _ = _api_client()
     try:
         resp = client.get(path)
@@ -4563,6 +4594,9 @@ def _api_get(path: str):
         return resp.json()
     except SystemExit:
         raise
+    except _httpx.HTTPStatusError as e:
+        console.print(f"[red]✗ API request failed: {_format_api_error(e.response)}[/red]")
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]✗ API request failed: {e}[/red]")
         raise SystemExit(1)
@@ -4577,6 +4611,7 @@ def _api_post(path: str, json_data: dict, timeout: Optional[float] = None):
     Use a large value for long-running endpoints such as remote-push, which
     waits for the platform to fetch files from GitHub and stage them on EFS.
     """
+    import httpx as _httpx
     client, _ = _api_client()
     try:
         kwargs = {"json": json_data}
@@ -4590,6 +4625,9 @@ def _api_post(path: str, json_data: dict, timeout: Optional[float] = None):
         return resp.json()
     except SystemExit:
         raise
+    except _httpx.HTTPStatusError as e:
+        console.print(f"[red]✗ API request failed: {_format_api_error(e.response)}[/red]")
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]✗ API request failed: {e}[/red]")
         raise SystemExit(1)
@@ -4602,6 +4640,7 @@ def _api_put(path: str, json_data: dict, timeout: Optional[float] = None):
 
     `timeout` (seconds) overrides the client default for this request only.
     """
+    import httpx as _httpx
     client, _ = _api_client()
     try:
         kwargs = {"json": json_data}
@@ -4615,6 +4654,9 @@ def _api_put(path: str, json_data: dict, timeout: Optional[float] = None):
         return resp.json()
     except SystemExit:
         raise
+    except _httpx.HTTPStatusError as e:
+        console.print(f"[red]✗ API request failed: {_format_api_error(e.response)}[/red]")
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]✗ API request failed: {e}[/red]")
         raise SystemExit(1)
