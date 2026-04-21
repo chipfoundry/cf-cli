@@ -402,8 +402,13 @@ def init(project_root, shuttle, description):
     local_proj = local_data.get('project', {}) if isinstance(local_data, dict) else {}
 
     config = load_user_config()
+    api_key = config.get('api_key')
     username = config.get("sftp_username")
-    if not username:
+    # Try to refresh sftp_username from the platform, but don't block init on it.
+    # SFTP accounts are only auto-provisioned once a project deposit is paid/waived/
+    # sponsored and the user has an SSH key on their profile; init must work before
+    # that so users can configure locally and use `cf precheck` / `cf push --remote`.
+    if not username and api_key:
         try:
             me = _api_get("/auth/cli/whoami")
             username = me.get("sftp_username")
@@ -412,11 +417,10 @@ def init(project_root, shuttle, description):
                 save_user_config(config)
         except SystemExit:
             pass
-    if not username:
-        console.print("[bold red]No SFTP account linked to your platform account. Please run 'cf login' first.[/bold red]")
-        raise click.Abort()
-
-    api_key = config.get('api_key')
+    # Fall back to email (or 'unknown') purely as a label in .cf/project.json.
+    # This field is metadata only: SFTP routing uses the live session identity,
+    # and the backend stores cli_project_json as an opaque blob.
+    user_label = username or config.get("user_email") or "unknown"
     platform_id = local_proj.get('platform_project_id')
     platform_proj: Optional[dict] = None
     if platform_id and api_key:
@@ -469,7 +473,7 @@ def init(project_root, shuttle, description):
     proj = data.setdefault('project', {})
     proj['name'] = name
     proj['type'] = project_type
-    proj['user'] = username
+    proj['user'] = user_label
     proj.setdefault('version', local_proj.get('version') or "1")
     proj.setdefault('user_project_wrapper_hash', local_proj.get('user_project_wrapper_hash', ""))
     proj.setdefault('submission_state', local_proj.get('submission_state', "Draft"))
@@ -1619,7 +1623,11 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         sftp_username = me.get("sftp_username")
         if not sftp_username:
             console.print("[bold red]No SFTP account linked to your platform account.[/bold red]")
-            console.print("Contact support or provide --sftp-username.")
+            console.print(
+                "An SFTP account is provisioned once a project deposit is paid/waived/sponsored "
+                "and an SSH public key is on your profile."
+            )
+            console.print("Override with --sftp-username if you already know yours, or contact support.")
             raise click.Abort()
         config["sftp_username"] = sftp_username
         save_user_config(config)
@@ -1805,7 +1813,11 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
         sftp_username = me.get("sftp_username")
         if not sftp_username:
             console.print("[bold red]No SFTP account linked to your platform account.[/bold red]")
-            console.print("Contact support or provide --sftp-username.")
+            console.print(
+                "An SFTP account is provisioned once a project deposit is paid/waived/sponsored "
+                "and an SSH public key is on your profile."
+            )
+            console.print("Override with --sftp-username if you already know yours, or contact support.")
             raise click.Abort()
         config["sftp_username"] = sftp_username
         save_user_config(config)
@@ -2089,24 +2101,34 @@ def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
         platform_id = _load_project_platform_id(os.getcwd())
         if not platform_id:
             console.print("[dim]Tip: Run [bold]cf link[/bold] to connect this project to the platform.[/dim]\n")
+    # SFTP listing is a best-effort extra on top of the platform status above.
+    # Skip it quietly when the user has no SFTP account yet (auto-provisioned
+    # after a project deposit is paid/waived/sponsored + an SSH key is on file).
     if not sftp_username:
-        me = _api_get("/auth/cli/whoami")
-        sftp_username = me.get("sftp_username")
+        if config.get("api_key"):
+            try:
+                me = _api_get("/auth/cli/whoami")
+                sftp_username = me.get("sftp_username")
+            except SystemExit:
+                sftp_username = None
         if not sftp_username:
-            console.print("[red]No SFTP account linked to your platform account.[/red]")
-            console.print("Contact support or provide --sftp-username.")
-            raise click.Abort()
+            console.print(
+                "[dim]SFTP listing skipped — no SFTP account linked yet. "
+                "An account is provisioned once a project deposit is paid/waived/sponsored "
+                "and an SSH public key is on your profile.[/dim]"
+            )
+            return
         config["sftp_username"] = sftp_username
         save_user_config(config)
     if not sftp_key:
         sftp_key = config.get("sftp_key")
-    
+
     # Always resolve key_path to absolute path if set
     if sftp_key:
         key_path = os.path.abspath(os.path.expanduser(sftp_key))
     else:
         key_path = DEFAULT_SSH_KEY
-    
+
     if not os.path.exists(key_path):
         console.print(f"[red]SFTP key file not found: {key_path}[/red]")
         console.print("[yellow]Please run 'cf keygen' to generate a key or 'cf config' to set a custom key path.[/yellow]")
@@ -2232,7 +2254,11 @@ def tapeouts(sftp_host, sftp_username, sftp_key, limit, days):
         sftp_username = me.get("sftp_username")
         if not sftp_username:
             console.print("[red]No SFTP account linked to your platform account.[/red]")
-            console.print("Contact support or provide --sftp-username.")
+            console.print(
+                "An SFTP account is provisioned once a project deposit is paid/waived/sponsored "
+                "and an SSH public key is on your profile."
+            )
+            console.print("Override with --sftp-username if you already know yours, or contact support.")
             raise click.Abort()
         config["sftp_username"] = sftp_username
         save_user_config(config)
@@ -2422,7 +2448,11 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
         sftp_username = me.get("sftp_username")
         if not sftp_username:
             console.print("[bold red]No SFTP account linked to your platform account.[/bold red]")
-            console.print("Contact support or provide --sftp-username.")
+            console.print(
+                "An SFTP account is provisioned once a project deposit is paid/waived/sponsored "
+                "and an SSH public key is on your profile."
+            )
+            console.print("Override with --sftp-username if you already know yours, or contact support.")
             raise click.Abort()
         config["sftp_username"] = sftp_username
         save_user_config(config)
