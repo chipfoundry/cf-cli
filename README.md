@@ -655,6 +655,10 @@ cf pull [--project-name NAME]
 **Prerequisites:** `cf login`, `cf link` (or `cf init`), `cf config`
 
 - Downloads project results from SFTP server
+- **Resolves the remote results directory by `platform_project_id` (UUID), not by project name** — survives case changes (e.g. `kyttar` → `Kyttar`) and renames on the platform without manual intervention
+  - First asks the platform API for the canonical project name and tries `outgoing/results/<canonical_name>`
+  - If that path is missing, falls back to scanning `outgoing/results/*/config/project.json` for a matching `platform_project_id`
+  - Pass `--project-name NAME` to bypass UUID resolution and force a literal directory lookup (debugging / unlinked legacy use)
 - Saves to `sftp-output/<project_name>/`
 - **Automatically updates** your local `.cf/project.json` with the pulled version (preserving the platform link)
 - **Syncs with the platform** and displays admin review notes if your project has been reviewed
@@ -859,20 +863,26 @@ The CLI tracks your project submission state through the `submission_state` fiel
    - Connects to SFTP server securely
    - Shows clean connection status
 
-2. **Download:**
+2. **Resolve remote directory by UUID:**
+   - Looks up the canonical project name from the platform via `platform_project_id`
+   - Tries `outgoing/results/<canonical_name>` first
+   - If that path is missing, scans `outgoing/results/*/config/project.json` for a directory whose embedded `platform_project_id` matches yours
+   - Warns if your local project name differs from the canonical platform name (the local copy is corrected automatically in step 4)
+
+3. **Download:**
    - Downloads all project results recursively
    - Shows professional download progress
    - Saves to `sftp-output/<project_name>/`
 
-3. **Config Update:**
+4. **Config Update:**
    - **Automatically merges** the pulled `project.json` with your local version (preserving the platform link)
 
-4. **Platform Sync:**
+5. **Platform Sync:**
    - Sends the updated `project.json` to the platform
    - Records the pull timestamp on the platform
    - Fetches and displays any admin review notes
 
-5. **Success:**
+6. **Success:**
    - Shows confirmation of downloaded files, sync status, and review notes
 
 ---

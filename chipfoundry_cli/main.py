@@ -2078,6 +2078,9 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
 @click.option('--sftp-key', type=click.Path(exists=True, dir_okay=False), help='Path to SFTP private key file (defaults to config).', default=None, show_default=False)
 def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
     """Download results/artifacts from SFTP output dir to local sftp-output/<project_name>."""
+    # Track whether the user explicitly passed --project-name (overrides
+    # canonical-name resolution via the platform API below).
+    explicit_project_name = project_name
     # If .cf/project.json exists in cwd, use its project name as default
     _, cwd_project_name = get_project_json_from_cwd()
     if not project_name and cwd_project_name:
@@ -2142,16 +2145,67 @@ def pull(project_name, output_dir, sftp_host, sftp_username, sftp_key):
         raise click.Abort()
     
     try:
+        # Resolve the remote results directory.
+        #
+        # Priority:
+        #   1. If the user passed --project-name explicitly, honor that name
+        #      verbatim (escape hatch / debugging).
+        #   2. Otherwise, ask the platform API for the canonical project name
+        #      via the platform_project_id (UUID) and try that name first.
+        #   3. If that directory does not exist on SFTP (e.g. the platform was
+        #      renamed but the old export directory still has the previous
+        #      name), scan `outgoing/results/*/config/project.json` and match
+        #      on `platform_project_id`. This is the authoritative UUID match
+        #      and survives case changes and renames.
+        if explicit_project_name:
+            resolved_name = explicit_project_name
+            try:
+                sftp.stat(f"outgoing/results/{resolved_name}")
+            except Exception:
+                console.print(f"[yellow]No results found for project '{resolved_name}' on SFTP server.[/yellow]")
+                return
+        else:
+            try:
+                platform_proj = _api_get(f"/projects/{platform_id}")
+            except SystemExit:
+                console.print(f"[red]Could not resolve canonical project name for platform_project_id={platform_id} from the platform API.[/red]")
+                raise click.Abort()
+            canonical_name = platform_proj.get("name") if isinstance(platform_proj, dict) else None
+            if not canonical_name:
+                console.print(f"[red]Platform did not return a name for project {platform_id}; cannot resolve SFTP directory.[/red]")
+                raise click.Abort()
+
+            try:
+                sftp.stat(f"outgoing/results/{canonical_name}")
+                resolved_name = canonical_name
+                if cwd_project_name and cwd_project_name != canonical_name:
+                    console.print(
+                        f"[yellow]Local project name '{cwd_project_name}' does not match the platform "
+                        f"name '{canonical_name}'. Using the platform name; your local .cf/project.json "
+                        f"will be updated after the pull completes.[/yellow]"
+                    )
+            except Exception:
+                console.print(
+                    f"[yellow]'outgoing/results/{canonical_name}' not found on SFTP. "
+                    f"Searching by project UUID ({platform_id})...[/yellow]"
+                )
+                matched_dir = _find_remote_results_dir_by_uuid(sftp, platform_id)
+                if matched_dir is None:
+                    console.print(
+                        f"[yellow]No results found for project '{canonical_name}' (UUID {platform_id}) on SFTP server.[/yellow]"
+                    )
+                    return
+                resolved_name = matched_dir
+                console.print(
+                    f"[yellow]Found a results directory matching this project's UUID at "
+                    f"'outgoing/results/{matched_dir}'. The directory name on SFTP differs from the "
+                    f"platform name '{canonical_name}' — using the SFTP directory.[/yellow]"
+                )
+
+        project_name = resolved_name
         remote_dir = f"outgoing/results/{project_name}"
         output_dir = os.path.join(os.getcwd(), "sftp-output", project_name)
-        
-        # Check if remote directory exists
-        try:
-            sftp.stat(remote_dir)
-        except Exception:
-            console.print(f"[yellow]No results found for project '{project_name}' on SFTP server.[/yellow]")
-            return
-        
+
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
@@ -4733,6 +4787,34 @@ def _load_project_platform_id(project_root: str):
     with open(pj) as f:
         data = json.load(f)
     return data.get('project', {}).get('platform_project_id')
+
+
+def _find_remote_results_dir_by_uuid(sftp, platform_id: str) -> Optional[str]:
+    """Scan outgoing/results/*/config/project.json for a directory whose embedded
+    platform_project_id matches `platform_id`. Returns the bare directory name
+    (not the full path) of the first match, or None if no match is found.
+
+    Used by `cf pull` as a UUID-based fallback when the canonical project
+    name from the platform does not resolve to an SFTP directory (e.g. the
+    project was renamed on the platform but the old SFTP results directory
+    still has the previous name on disk).
+    """
+    try:
+        dirs = sftp.listdir("outgoing/results")
+    except Exception:
+        return None
+
+    for d in dirs:
+        cfg_path = f"outgoing/results/{d}/config/project.json"
+        try:
+            with sftp.open(cfg_path, "r") as f:
+                data = json.loads(f.read().decode("utf-8"))
+        except Exception:
+            continue
+        proj = data.get("project", {}) if isinstance(data, dict) else {}
+        if isinstance(proj, dict) and proj.get("platform_project_id") == platform_id:
+            return d
+    return None
 
 
 def _save_platform_id(project_root: str, platform_id: str, project_name: str = None):
