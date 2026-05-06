@@ -389,6 +389,59 @@ def _prompt_with_default(label: str, current: Optional[str], detected: Optional[
     return raw
 
 
+def _shuttle_sort_key(shuttle: dict) -> str:
+    """Sort shuttles by date while handling null/missing dates safely."""
+    tapeout_date = shuttle.get("tapeout_date")
+    if isinstance(tapeout_date, str) and tapeout_date.strip():
+        return tapeout_date
+    return "9999-12-31"
+
+
+def _confirm_new_project_creation() -> bool:
+    """Ask for explicit confirmation before creating a new platform project."""
+    return click.confirm(
+        "Create a NEW platform project now? "
+        "(Select 'No' if you intended to link an existing project with `cf link`.)",
+        default=False,
+    )
+
+
+def _prompt_init_platform_action() -> str:
+    """Ask whether init should link to an existing project or create a new one."""
+    console.print("\n[bold]Platform action[/bold]")
+    console.print("  [cyan]1[/cyan]. Link to an existing platform project")
+    console.print("  [cyan]2[/cyan]. Create a new platform project")
+    choice = console.input("Select option [1/2, default 1]: ").strip()
+    if choice in ("", "1"):
+        return "link"
+    if choice == "2":
+        return "create"
+    console.print("[yellow]Invalid selection — defaulting to linking an existing project.[/yellow]")
+    return "link"
+
+
+def _choose_platform_project(projects: List[dict]) -> Optional[dict]:
+    """Show a numbered project list and return the selected project, if any."""
+    console.print("\n[bold]Your platform projects:[/bold]")
+    for i, p in enumerate(projects, 1):
+        status_str = p.get('status', 'unknown')
+        shuttle_str = f" — {p.get('shuttle_name', '')}" if p.get('shuttle_name') else ""
+        console.print(f"  [cyan]{i}[/cyan]. {p['name']}{shuttle_str} [{status_str}]")
+    console.print(f"  [cyan]{len(projects) + 1}[/cyan]. Create a new platform project")
+
+    choice = console.input("\nSelect project number: ").strip()
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(projects):
+            return projects[idx]
+        if idx == len(projects):
+            return None
+    except ValueError:
+        pass
+    console.print("[red]Invalid selection.[/red]")
+    return None
+
+
 @main.command('init')
 @click.option('--project-root', required=False, type=click.Path(file_okay=False), help='Project directory (defaults to current directory).')
 @click.option('--shuttle', default=None, help='Shuttle name or ID to associate with the project.')
@@ -539,12 +592,43 @@ def init(project_root, shuttle, description):
         console.print(f"  Portal:  {portal_url}/projects/{platform_id}")
         return
 
+    if api_key:
+        try:
+            projects = _api_get("/projects/me")
+        except SystemExit:
+            projects = []
+        if projects:
+            action = _prompt_init_platform_action()
+            if action == "link":
+                selected = _choose_platform_project(projects)
+                if selected:
+                    proj['platform_project_id'] = selected['id']
+                    if selected.get('name'):
+                        old_name = proj.get('name')
+                        proj['name'] = selected['name']
+                        if old_name and old_name != selected['name']:
+                            console.print(
+                                f"[yellow]Updated project name: '{old_name}' → '{selected['name']}' "
+                                "(synced from platform)[/yellow]"
+                            )
+                    with open(project_json_path, 'w') as f:
+                        json.dump(data, f, indent=2)
+                    portal_url = _get_portal_url()
+                    console.print(f"\n[green]✓ Linked to existing platform project[/green]")
+                    console.print(f"  Name:    {selected['name']}")
+                    console.print(f"  ID:      {selected['id']}")
+                    if github_repo_url:
+                        console.print(f"  GitHub:  {github_repo_url}")
+                    console.print(f"  Portal:  {portal_url}/projects/{selected['id']}")
+                    return
+                console.print("[dim]Continuing with new project creation.[/dim]")
+
     shuttle_id = shuttle
     if not shuttle_id:
         try:
             shuttles = _api_get("/shuttles/available")
             if shuttles:
-                shuttles.sort(key=lambda s: s.get('tapeout_date', '9999-12-31'))
+                shuttles.sort(key=_shuttle_sort_key)
                 console.print("\n[bold]Available shuttles:[/bold]")
                 for i, s in enumerate(shuttles, 1):
                     deadline = s.get('tapeout_date', '')
@@ -570,6 +654,13 @@ def init(project_root, shuttle, description):
         create_data["shuttle_id"] = str(shuttle_id)
     if github_repo_url:
         create_data["github_repo_url"] = github_repo_url
+
+    if not _confirm_new_project_creation():
+        with open(project_json_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        console.print("[yellow]Skipped platform project creation.[/yellow]")
+        console.print("[dim]Tip: Run [bold]cf link[/bold] to select an existing platform project.[/dim]")
+        return
 
     try:
         project_resp = _api_post("/projects", create_data)
