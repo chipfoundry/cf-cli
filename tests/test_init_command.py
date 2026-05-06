@@ -3,7 +3,13 @@ Unit tests for cf init command.
 """
 import pytest
 from click.testing import CliRunner
-from chipfoundry_cli.main import main
+from chipfoundry_cli.main import (
+    main,
+    _shuttle_sort_key,
+    _confirm_new_project_creation,
+    _prompt_init_platform_action,
+    _choose_platform_project,
+)
 from pathlib import Path
 import json
 import tempfile
@@ -65,6 +71,50 @@ class TestInitCommand:
             result = runner.invoke(main, ['init', '--help'])
             
             assert result.exit_code == 0
+
+    def test_shuttle_sort_key_handles_none_tapeout_date(self):
+        """Shuttle sort key should not crash on null or missing dates."""
+        shuttles = [
+            {"id": "late", "tapeout_date": None},
+            {"id": "soon", "tapeout_date": "2026-06-01"},
+            {"id": "missing"},
+            {"id": "middle", "tapeout_date": "2026-07-15"},
+        ]
+
+        sorted_ids = [s["id"] for s in sorted(shuttles, key=_shuttle_sort_key)]
+        assert sorted_ids == ["soon", "middle", "late", "missing"]
+
+    def test_confirm_new_project_creation_uses_safe_default(self, monkeypatch):
+        """Creation confirmation should default to 'No' to prevent accidental project creation."""
+        captured = {}
+
+        def fake_confirm(text, default):
+            captured["text"] = text
+            captured["default"] = default
+            return True
+
+        monkeypatch.setattr("chipfoundry_cli.main.click.confirm", fake_confirm)
+        approved = _confirm_new_project_creation()
+
+        assert approved is True
+        assert captured["default"] is False
+        assert "Create a NEW platform project now?" in captured["text"]
+
+    def test_prompt_init_platform_action_defaults_to_link(self, monkeypatch):
+        """init should default to linking an existing project."""
+        monkeypatch.setattr("chipfoundry_cli.main.console.input", lambda _msg: "")
+        action = _prompt_init_platform_action()
+        assert action == "link"
+
+    def test_choose_platform_project_returns_selected_project(self, monkeypatch):
+        """Chooser should return selected project entry."""
+        projects = [
+            {"id": "p1", "name": "Project 1", "status": "draft"},
+            {"id": "p2", "name": "Project 2", "status": "submitted"},
+        ]
+        monkeypatch.setattr("chipfoundry_cli.main.console.input", lambda _msg: "2")
+        selected = _choose_platform_project(projects)
+        assert selected == projects[1]
 
 
 if __name__ == '__main__':
