@@ -572,7 +572,7 @@ cf push [OPTIONS]
 **Options:**
 - `--project-root`: Specify project directory
 - `--force-overwrite`: Overwrite existing files on SFTP (SFTP mode only)
-- `--submit`: Submit the project for review after upload
+- `--submit`: Submit the project for review after upload (shortcut for `cf push` + `cf submit`)
 - `--dry-run`: Preview what would be uploaded
 - `--sftp-username`: Override configured username (SFTP mode only)
 - `--sftp-key`: Override configured key path (SFTP mode only)
@@ -632,6 +632,15 @@ What happens:
 3. Platform stages the objects onto your SFTP landing zone, re-verifying SHA-256 byte-for-byte and synthesizing `.cf/project.json` from the authoritative platform data.
 4. Staged S3 objects are deleted on success; any leftovers are expired by the bucket lifecycle after 7 days.
 5. `--submit` submits for review on success.
+
+### Submit a Project for Review (No Re-upload)
+
+```bash
+cf submit [--project-root PATH]
+```
+
+Use this when your latest `cf push` already uploaded the files you want reviewed.  
+`cf submit` moves the platform project into review without requiring another upload.
 
 > [!TIP]
 > Try modes in this order: `cf push` → `cf push --remote` → `cf push --https`.

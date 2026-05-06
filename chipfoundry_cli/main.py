@@ -2860,6 +2860,45 @@ def view_tapeout_report(project_name, report_path):
         console.print(f"[red]Failed to open tapeout report in browser: {e}[/red]")
         raise click.Abort()
 
+@main.command("submit")
+@click.option(
+    "--project-root",
+    required=False,
+    type=click.Path(exists=True, file_okay=False),
+    help="Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).",
+)
+def submit(project_root):
+    """Submit a project for admin review without uploading files again."""
+    cwd_root, _ = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        console.print(
+            "[red]No project root specified and no .cf/project.json found in current directory.[/red]"
+        )
+        console.print("Provide --project-root or run from a linked project.")
+        raise click.Abort()
+
+    project_root = str(Path(project_root).resolve())
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id:
+        console.print("[red]Project is not linked to the platform.[/red]")
+        console.print(
+            "Run [bold]cf link[/bold] to connect this project, or [bold]cf init[/bold] to create a new one."
+        )
+        raise click.Abort()
+
+    config = load_user_config()
+    if not config.get("api_key"):
+        console.print("[red]Not logged in.[/red] Run [bold]cf login[/bold] before submitting.")
+        raise click.Abort()
+
+    try:
+        _api_post(f"/projects/{platform_id}/submit", {})
+        console.print("[green]✓ Project submitted for review[/green]")
+    except SystemExit:
+        raise click.Abort()
+
 @main.command('confirm')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
