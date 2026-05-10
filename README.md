@@ -401,13 +401,18 @@ cf harden [MACRO] [OPTIONS]
 
 **Key Options:**
 - `--list` or no argument: List all available macros
+- `--list-from-steps`: List valid LibreLane step names for `--from` for a specific macro
 - `MACRO`: Name of macro to harden (e.g., `user_proj_example`, `user_project_wrapper`)
 - `--project-root`: Specify project directory
-- `--tag`: Custom run tag (defaults to timestamp)
+- `--tag`: Run tag. Without `--from`, existing tag is overwritten; with `--from`, resumes that tag
+- `--from`: Start hardening from a specific LibreLane step (e.g., `OpenROAD.DetailedRouting`)
+- `--tag` + `--from`: Resume from that step using the existing run state under the specified tag
+- `--from` without `--tag`: Resume from that step using the latest existing run tag for the macro
+- `--open-in-openroad`: Open an existing run in OpenROAD GUI (uses latest run if `--tag` omitted)
+- `--open-in-klayout`: Open an existing run in KLayout GUI (uses latest run if `--tag` omitted)
 - `--pdk`: PDK to use (default: sky130A)
 - `--use-nix`: Force use of Nix (fails if Nix not available)
 - `--use-docker`: Force use of Docker (fails if Docker not available)
-- `--dry-run`: Show configuration without running
 
 **Examples:**
 ```bash
@@ -420,8 +425,22 @@ cf harden user_proj_example
 # Harden with custom tag and PDK
 cf harden user_proj_example --tag my_run --pdk sky130B
 
-# Preview hardening configuration
-cf harden user_proj_example --dry-run
+# Resume flow from a specific LibreLane step
+cf harden user_proj_example --tag test2 --from OpenROAD.DetailedRouting
+
+# Resume from latest existing run tag automatically
+cf harden user_proj_example --from OpenROAD.DetailedRouting
+
+# Show exact valid --from step names for a macro
+cf harden user_proj_example --list-from-steps
+
+# Open GUI for a specific run tag
+cf harden user_proj_example --tag test2 --open-in-openroad
+cf harden user_proj_example --tag test2 --open-in-klayout
+
+# Open GUI for latest existing run tag automatically
+cf harden user_proj_example --open-in-openroad
+
 ```
 
 **Workflow:**
