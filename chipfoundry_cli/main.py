@@ -4094,7 +4094,6 @@ def harden(macro, project_root, list_designs, list_from_steps, tag, from_step, o
             str(venv_bin / 'python3'), '-m', 'librelane',
             '-m', str(project_root_path),
             '-m', str(pdk_root),
-            '--dockerized',
         ]
         
         # Add --docker-no-tty if not running in a TTY (e.g., CI environments)
@@ -4104,7 +4103,10 @@ def harden(macro, project_root, list_designs, list_from_steps, tag, from_step, o
         except:
             # If we can't detect TTY, assume non-TTY (safer for CI)
             cmd.append('--docker-no-tty')
-        
+
+        # --docker-no-tty must come before --dockerized
+        cmd.append('--dockerized')
+
         cmd.extend([
             '--manual-pdk',
             '--pdk-root', str(pdk_root),
