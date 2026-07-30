@@ -3,7 +3,11 @@ import getpass
 import hashlib
 from typing import Optional, List, Tuple
 from chipfoundry_cli.check_refs import PRECHECK_CHECKS
-from chipfoundry_cli.remote_precheck_git import RemotePrecheckGitError, verify_remote_precheck_repo
+from chipfoundry_cli.remote_precheck_git import (
+    RemotePrecheckGitError,
+    verify_remote_job_repo,
+    verify_remote_precheck_repo,
+)
 from chipfoundry_cli.version_check import maybe_warn_outdated
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
@@ -3658,7 +3662,156 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             console.print("[bold green]Installation complete![/bold green]")
         else:
             console.print("[bold green]Setup complete![/bold green]")
-    
+
+
+def _queue_and_maybe_poll_remote_job(
+    *,
+    create_path: str,
+    job_get_path_template: str,
+    params: list,
+    dry_run: bool,
+    poll: bool,
+    wait_timeout: int,
+    label: str,
+) -> None:
+    """POST a remote platform job and optionally poll until terminal status."""
+    import time
+    from urllib.parse import urlencode
+
+    import httpx as httpx_remote
+
+    if dry_run:
+        console.print(f"[cyan]Would POST[/cyan] {create_path}?" + urlencode(params))
+        return
+    if poll and wait_timeout < 0:
+        console.print(
+            "[red]✗[/red] --wait-timeout must be >= 0 (0 means no limit while polling)."
+        )
+        raise SystemExit(1)
+    config = load_user_config()
+    api_key = config.get('api_key')
+    if not api_key:
+        console.print("[yellow]Not logged in.[/yellow] Run [bold]cf login[/bold] first.")
+        raise SystemExit(1)
+    api_url = _get_api_url()
+    client = httpx_remote.Client(
+        base_url=f"{api_url}/api/v1",
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'User-Agent': _cf_user_agent(),
+        },
+        timeout=120.0,
+    )
+    try:
+        resp = client.post(create_path, params=params)
+        if resp.status_code == 401:
+            console.print("[red]✗[/red] API key is invalid or expired. Run [bold]cf login[/bold].")
+            raise SystemExit(1)
+        if not resp.is_success:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            console.print(f"[red]✗[/red] {detail}")
+            raise SystemExit(1)
+        job = resp.json()
+        jid = job["id"]
+        st0 = job.get("status") or "unknown"
+        if st0 == "failed":
+            console.print(f"[cyan]{label}[/cyan] job_id={jid} status={st0}")
+        elif st0 == "running":
+            console.print(f"[cyan]{label} started[/cyan] job_id={jid} status={st0}")
+        else:
+            console.print(f"[cyan]Queued {label.lower()}[/cyan] job_id={jid} status={st0}")
+        if job.get("status") == "failed" and job.get("error_message"):
+            console.print(f"[red]✗[/red] {job['error_message']}")
+            raise SystemExit(1)
+        if job.get("status") == "completed":
+            console.print(f"[green]✓[/green] {label} completed")
+            if job.get("github_pr_url"):
+                console.print(f"  Pull request: {job['github_pr_url']}")
+            return
+        if not poll:
+            console.print(
+                f"[dim]Not waiting: use [bold]--remote --poll[/bold] to stream progress "
+                f"([bold]--wait-timeout 0[/bold] = no time limit while polling).[/dim]"
+            )
+            return
+        deadline = None if wait_timeout == 0 else time.monotonic() + wait_timeout
+        if wait_timeout == 0:
+            console.print("[dim]Polling until the job completes (no timeout).[/dim]")
+        else:
+            console.print(
+                f"[dim]Polling every 5s; stops after {wait_timeout}s if still queued or running. "
+                f"Use [bold]--wait-timeout 0[/bold] for no limit.[/dim]"
+            )
+        last_status_seen = st0
+        terminal = None
+        github_pr_url = None
+        fail_message = None
+        progress_emitted = 0
+        get_path = job_get_path_template.format(jid=jid)
+        console.print("[dim]Worker log batches appear below as the platform receives them (5s poll).[/dim]")
+        while True:
+            if deadline is not None and time.monotonic() > deadline:
+                console.print(
+                    f"[yellow]⚠[/yellow] Timed out waiting for {label.lower()} (job still queued or running)."
+                )
+                console.print(
+                    f"[dim]job_id={jid} — open the project in the portal or run [bold]cf status[/bold].[/dim]"
+                )
+                console.print(
+                    "[dim]Cancel a stuck run in the portal, or retry with e.g. "
+                    "[bold]--remote --poll --wait-timeout 14400[/bold].[/dim]"
+                )
+                raise SystemExit(1)
+            time.sleep(5)
+            r2 = client.get(get_path)
+            if r2.status_code == 401:
+                console.print("[red]✗[/red] API key is invalid or expired.")
+                raise SystemExit(1)
+            r2.raise_for_status()
+            j2 = r2.json()
+            st = j2.get("status")
+            prog = j2.get("progress")
+            if isinstance(prog, list) and len(prog) > progress_emitted:
+                for row in prog[progress_emitted:]:
+                    if not isinstance(row, dict):
+                        continue
+                    msg = row.get("message")
+                    if msg:
+                        console.print(Text(str(msg), style="dim"))
+                progress_emitted = len(prog)
+            if st == "completed":
+                terminal = "completed"
+                github_pr_url = j2.get("github_pr_url")
+                break
+            if st == "failed":
+                terminal = "failed"
+                fail_message = j2.get("error_message") or "unknown error"
+                break
+            if st != last_status_seen:
+                console.print(
+                    f"[dim]… job status[/dim] [cyan]{st or 'unknown'}[/cyan]"
+                )
+                last_status_seen = st
+
+        if terminal == "completed":
+            console.print(f"[green]✓[/green] {label} completed")
+            if github_pr_url:
+                console.print(f"  Pull request: {github_pr_url}")
+        elif terminal == "failed":
+            console.print(f"[red]✗[/red] {label} failed: {fail_message}")
+            raise SystemExit(1)
+    except SystemExit:
+        raise
+    except Exception as e:
+        console.print(f"[red]✗[/red] {label} request failed: {e}")
+        raise SystemExit(1)
+    finally:
+        client.close()
+
+
 @main.command('harden')
 @click.argument('macro', required=False)
 @click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
@@ -3668,13 +3821,29 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
 @click.option('--use-nix', is_flag=True, help='Force use of Nix (fails if Nix not available)')
 @click.option('--use-docker', is_flag=True, help='Force use of Docker (fails if Docker not available)')
 @click.option('--dry-run', is_flag=True, help='Show the configuration without running')
-def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry_run):
+@click.option('--remote', is_flag=True, help='Queue PNR on the ChipFoundry platform (requires cf login + linked project)')
+@click.option(
+    '--poll',
+    is_flag=True,
+    help='With --remote: poll until the job finishes and print progress (5s interval).',
+)
+@click.option('--git-ref', default='main', show_default=True, help='Git branch or tag for remote PNR')
+@click.option(
+    '--wait-timeout',
+    type=int,
+    default=7200,
+    show_default=True,
+    help='With --remote --poll: max seconds to wait (0 = no limit). Ignored without --poll.',
+)
+def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry_run, remote, poll, git_ref, wait_timeout):
     """Harden a macro using LibreLane (OpenLane 2).
     
     Examples:
         cf harden user_proj_example   # Harden a specific macro
         cf harden user_project_wrapper
         cf harden --list              # List available macros
+        cf harden user_proj_example --remote
+        cf harden user_proj_example --remote --poll
     """
     from datetime import datetime
     
@@ -3686,6 +3855,44 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         project_root = os.getcwd()
     
     project_root_path = Path(project_root)
+
+    if poll and not remote:
+        console.print("[red]✗[/red] --poll requires --remote.")
+        raise SystemExit(1)
+
+    if remote:
+        if list_designs or not macro:
+            console.print("[red]✗[/red] --remote requires a macro name (cannot use --list).")
+            raise SystemExit(1)
+        if not check_project_initialized(project_root_path, 'harden', dry_run=dry_run, allow_graceful=True):
+            console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
+            return
+        platform_id = _load_project_platform_id(str(project_root_path))
+        if not platform_id:
+            console.print(
+                "[red]✗[/red] Link this repo to a platform project (set platform_project_id via [bold]cf link[/bold])."
+            )
+            raise SystemExit(1)
+        try:
+            verify_remote_job_repo(project_root_path, git_ref)
+        except RemotePrecheckGitError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise SystemExit(1)
+        remote_params = [("macro", macro), ("git_ref", git_ref)]
+        if pdk:
+            remote_params.append(("pdk", pdk))
+        if tag:
+            remote_params.append(("run_tag", tag))
+        _queue_and_maybe_poll_remote_job(
+            create_path=f"/projects/{platform_id}/pnr-jobs",
+            job_get_path_template=f"/projects/{platform_id}/pnr-jobs/{{jid}}",
+            params=remote_params,
+            dry_run=dry_run,
+            poll=poll,
+            wait_timeout=wait_timeout,
+            label="Remote PNR",
+        )
+        return
     
     # Check if project is initialized (skip check for --list or when no macro specified, allow graceful return)
     if not list_designs and macro:
@@ -4480,7 +4687,21 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
 @click.option('--all', 'run_all', is_flag=True, help='Run all tests')
 @click.option('--tag', help='Test list tag/yaml file (e.g., all_tests or user_proj_tests)')
 @click.option('--dry-run', is_flag=True, help='Show the configuration without running')
-def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
+@click.option('--remote', is_flag=True, help='Queue simulation on the ChipFoundry platform (requires cf login + linked project)')
+@click.option(
+    '--poll',
+    is_flag=True,
+    help='With --remote: poll until the job finishes and print progress (5s interval).',
+)
+@click.option('--git-ref', default='main', show_default=True, help='Git branch or tag for remote simulation')
+@click.option(
+    '--wait-timeout',
+    type=int,
+    default=7200,
+    show_default=True,
+    help='With --remote --poll: max seconds to wait (0 = no limit). Ignored without --poll.',
+)
+def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, poll, git_ref, wait_timeout):
     """Run cocotb verification tests.
     
     Examples:
@@ -4489,6 +4710,8 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         cf verify counter_la --sim gl       # Run gate-level simulation
         cf verify --all                     # Run all tests
         cf verify --tag all_tests           # Run tests from a yaml list
+        cf verify counter_la --remote
+        cf verify --all --remote --poll
     """
     # If .cf/project.json exists in cwd, use it as default project_root
     cwd_root, _ = get_project_json_from_cwd()
@@ -4498,6 +4721,53 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run):
         project_root = os.getcwd()
     
     project_root_path = Path(project_root)
+
+    if poll and not remote:
+        console.print("[red]✗[/red] --poll requires --remote.")
+        raise SystemExit(1)
+
+    if remote:
+        if list_tests:
+            console.print("[red]✗[/red] --remote cannot be combined with --list.")
+            raise SystemExit(1)
+        if not check_project_initialized(project_root_path, 'verify', dry_run=dry_run, allow_graceful=True):
+            console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
+            return
+        if not test and not run_all and not tag:
+            console.print("[red]Error: Specify a test name, use --all, or --tag <test_list>[/red]")
+            raise SystemExit(1)
+        mode_count = int(bool(test)) + int(bool(run_all)) + int(bool(tag))
+        if mode_count != 1:
+            console.print("[red]Error: Use exactly one of: test name, --all, or --tag[/red]")
+            raise SystemExit(1)
+        platform_id = _load_project_platform_id(str(project_root_path))
+        if not platform_id:
+            console.print(
+                "[red]✗[/red] Link this repo to a platform project (set platform_project_id via [bold]cf link[/bold])."
+            )
+            raise SystemExit(1)
+        try:
+            verify_remote_job_repo(project_root_path, git_ref)
+        except RemotePrecheckGitError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise SystemExit(1)
+        remote_params = [("git_ref", git_ref), ("sim_type", (sim or "rtl").lower())]
+        if run_all:
+            remote_params.append(("run_all", "true"))
+        elif tag:
+            remote_params.append(("test_list_tag", tag))
+        else:
+            remote_params.append(("test", test))
+        _queue_and_maybe_poll_remote_job(
+            create_path=f"/projects/{platform_id}/simulation-jobs",
+            job_get_path_template=f"/projects/{platform_id}/simulation-jobs/{{jid}}",
+            params=remote_params,
+            dry_run=dry_run,
+            poll=poll,
+            wait_timeout=wait_timeout,
+            label="Remote simulation",
+        )
+        return
     
     # Check if project is initialized (skip check if just listing tests, allow graceful return)
     if not list_tests:

@@ -228,6 +228,47 @@ def verify_remote_precheck_repo(
             )
 
 
+def verify_remote_job_repo(project_root: Path, git_ref: str) -> None:
+    """
+    Thin git consistency check for remote harden / verify.
+
+    Ensures origin/{git_ref} tip matches HEAD. Does not require wrapper GDS or
+    other precheck layout inputs (those may not exist yet when hardening).
+    """
+    repo = project_root.resolve()
+    git_marker = repo / ".git"
+    if not (git_marker.is_dir() or git_marker.is_file()):
+        raise RemotePrecheckGitError(
+            "Remote jobs require a git checkout with .git "
+            "(clone your GitHub repo, not a plain folder copy)."
+        )
+
+    remote_sha = _resolve_origin_tip_sha(repo, git_ref)
+    head_sha = _local_head_sha(repo)
+    if head_sha != remote_sha:
+        raise RemotePrecheckGitError(
+            f"Local HEAD ({head_sha[:7]}) must match origin {git_ref!r} ({remote_sha[:7]}). "
+            f"git checkout {git_ref} && git pull, or push your commits, then retry."
+        )
+
+    # If .cf/project.json is tracked, require it clean so the remote clone matches.
+    if _path_tracked_in_git(repo, CF_PROJECT_JSON_REL):
+        dirty = _porcelain_paths(repo)
+        for entry in dirty:
+            path = entry[2:] if entry.startswith("??") else entry
+            if path == CF_PROJECT_JSON_REL:
+                raise RemotePrecheckGitError(
+                    f"{CF_PROJECT_JSON_REL!r} has uncommitted changes. "
+                    "Commit or stash before queueing a remote job."
+                )
+        r = _run_git(repo, "diff-index", "--quiet", "HEAD", "--", CF_PROJECT_JSON_REL)
+        if r.returncode != 0:
+            raise RemotePrecheckGitError(
+                f"{CF_PROJECT_JSON_REL!r} has uncommitted changes. "
+                "Commit or stash before queueing a remote job."
+            )
+
+
 class RemotePushGitError(Exception):
     """Local repository state is not consistent with origin for remote push."""
 
