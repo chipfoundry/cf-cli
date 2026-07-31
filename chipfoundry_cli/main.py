@@ -3554,10 +3554,12 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                         check=True,
                         capture_output=True
                     )
-                    
-                    # Determine the python executable path in venv
-                    venv_python = str(venv_cocotb / 'bin' / 'python3')
-                    
+
+                venv_python = str(venv_cocotb / 'bin' / 'python3')
+
+                # Install (or reinstall) when the package is missing or --overwrite was used.
+                # The venv may already exist from a previous partial failure.
+                if not is_installed or overwrite:
                     console.print("[cyan]Installing caravel-cocotb from source (chipfoundry/caravel-sim-infrastructure)...[/cyan]")
                     subprocess.run(
                         [venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir', 'pip'],
