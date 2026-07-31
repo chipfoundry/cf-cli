@@ -3666,6 +3666,58 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             console.print("[bold green]Setup complete![/bold green]")
 
 
+def _is_nix_toolchain_noise_line(line: str) -> bool:
+    """Match Nix fetch/build chatter posted by the PNR runner."""
+    s = line.strip()
+    if not s:
+        return True
+    bare = s[len("[stderr]") :].lstrip() if s.startswith("[stderr]") else s
+    low = bare.lower()
+    if low.startswith("copying path"):
+        return True
+    if low.startswith("building '/nix/store/") or low.startswith('building "/nix/store/'):
+        return True
+    if low.startswith("downloading '") or low.startswith('downloading "'):
+        return True
+    if low.startswith("unpacking 'github:") or low.startswith('unpacking "github:'):
+        return True
+    if "paths will be fetched" in low or "paths will be copied" in low:
+        return True
+    if low.startswith("copying ") and " path" in low:
+        return True
+    if low.startswith("waiting for lock") or low.startswith("waiting for locks"):
+        return True
+    if bare.startswith("/nix/store/") or bare.startswith("  /nix/store/"):
+        return True
+    return False
+
+
+def _print_remote_progress_message(msg: object, *, style: str = "dim") -> None:
+    """Print worker progress, collapsing Nix toolchain noise into a one-liner."""
+    text = str(msg)
+    lines = text.splitlines()
+    kept: List[str] = []
+    noise = 0
+    for line in lines:
+        if _is_nix_toolchain_noise_line(line):
+            noise += 1
+        else:
+            kept.append(line)
+    if noise and not kept:
+        console.print(
+            Text(
+                f"Nix toolchain resolving… ({noise} build/fetch lines suppressed)",
+                style="dim",
+            )
+        )
+        return
+    if noise:
+        kept.append(f"(also suppressed {noise} Nix build/fetch lines)")
+    out = "\n".join(kept).rstrip()
+    if out:
+        console.print(Text(out, style=style))
+
+
 def _queue_and_maybe_poll_remote_job(
     *,
     create_path: str,
@@ -3782,7 +3834,7 @@ def _queue_and_maybe_poll_remote_job(
                         continue
                     msg = row.get("message")
                     if msg:
-                        console.print(Text(str(msg), style="dim"))
+                        _print_remote_progress_message(msg)
                 progress_emitted = len(prog)
             if st == "completed":
                 terminal = "completed"
@@ -4512,9 +4564,9 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
                                 isinstance(det, dict)
                                 and det.get("event") == "check_done"
                             ):
-                                console.print(Text(str(msg), style="bold"))
+                                _print_remote_progress_message(msg, style="bold")
                             else:
-                                console.print(Text(str(msg), style="dim"))
+                                _print_remote_progress_message(msg)
                     progress_emitted = len(prog)
                 if st == "completed":
                     terminal = "completed"
