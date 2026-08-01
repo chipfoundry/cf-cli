@@ -32,11 +32,14 @@ class TestHardenCommand:
         assert 'Harden a macro using LibreLane' in result.output
         assert '--project-root' in result.output
         assert '--list' in result.output
+        assert '--list-from-steps' in result.output
         assert '--tag' in result.output
+        assert '--from' in result.output
+        assert '--open-in-openroad' in result.output
+        assert '--open-in-klayout' in result.output
         assert '--pdk' in result.output
         assert '--use-nix' in result.output
         assert '--use-docker' in result.output
-        assert '--dry-run' in result.output
     
     def test_harden_list(self, temp_project_dir):
         """Test harden command with --list flag."""
@@ -58,7 +61,6 @@ class TestHardenCommand:
             'harden',
             'user_proj_example',
             '--project-root', temp_project_dir,
-            '--dry-run'
         ])
         
         # Command returns 0 even on error, just prints error message
@@ -73,9 +75,9 @@ class TestHardenCommand:
             'user_proj_example',
             '--project-root', temp_project_dir,
             '--tag', 'test_tag',
+            '--from', 'OpenROAD.DetailedRouting',
             '--pdk', 'sky130A',
             '--use-docker',
-            '--dry-run'
         ])
         
         # Command returns 0 even on error, just prints error message

@@ -32,6 +32,7 @@ import subprocess
 import sys
 import shutil
 import signal
+import difflib
 
 # Textual imports for GPIO grid UI
 from textual.app import App, ComposeResult
@@ -44,6 +45,42 @@ DEFAULT_SSH_KEY = os.path.expanduser('~/.ssh/chipfoundry-key')
 DEFAULT_SFTP_HOST = 'sftp.chipfoundry.io'
 
 console = Console()
+
+class CategorizedCommand(click.Command):
+    """Click command with categorized help sections for options."""
+
+    def __init__(self, *args, option_categories=None, **kwargs):
+        self.option_categories = option_categories or []
+        super().__init__(*args, **kwargs)
+
+    def format_options(self, ctx, formatter):
+        options = {}
+        for param in self.get_params(ctx):
+            if not isinstance(param, click.Option):
+                continue
+            # Keep built-in --help available but omit it from custom sections.
+            if param.name == "help":
+                continue
+            record = param.get_help_record(ctx)
+            if record:
+                # Make option names easier to scan in help output.
+                options[param.name] = (click.style(record[0], fg="cyan"), record[1])
+
+        rendered = set()
+        for title, option_names in self.option_categories:
+            rows = []
+            for opt_name in option_names:
+                if opt_name in options:
+                    rows.append(options[opt_name])
+                    rendered.add(opt_name)
+            if rows:
+                with formatter.section(click.style(title, fg="green", bold=True)):
+                    formatter.write_dl(rows)
+
+        remaining_rows = [row for name, row in options.items() if name not in rendered]
+        if remaining_rows:
+            with formatter.section(click.style("Other Options", fg="green", bold=True)):
+                formatter.write_dl(remaining_rows)
 
 def get_git_tag(repo_path):
     """Get the current git tag/branch of a repository."""
@@ -3866,11 +3903,25 @@ def _queue_and_maybe_poll_remote_job(
         client.close()
 
 
-@main.command('harden')
+@main.command(
+    'harden',
+    cls=CategorizedCommand,
+    option_categories=[
+        ("Design Selection", ["project_root", "list_designs", "list_from_steps"]),
+        ("Run Controls", ["tag", "from_step"]),
+        ("GUI Modes", ["open_in_openroad", "open_in_klayout"]),
+        ("Execution Backend", ["pdk", "use_nix", "use_docker"]),
+        ("Remote", ["dry_run", "remote", "poll", "git_ref", "wait_timeout"]),
+    ],
+)
 @click.argument('macro', required=False)
 @click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
 @click.option('--list', 'list_designs', is_flag=True, help='List all available macros')
-@click.option('--tag', help='Custom run tag (defaults to timestamp)')
+@click.option('--list-from-steps', is_flag=True, help='List valid LibreLane step names for --from (requires MACRO)')
+@click.option('--tag', help='Run tag. Without --from, existing tag is overwritten; with --from, resumes that tag')
+@click.option('--from', 'from_step', help='Start hardening from a specific LibreLane step (uses latest run tag if --tag is omitted)')
+@click.option('--open-in-openroad', is_flag=True, help='Open an existing run in the OpenROAD GUI')
+@click.option('--open-in-klayout', is_flag=True, help='Open an existing run in the KLayout GUI')
 @click.option('--pdk', help='PDK to use (defaults to sky130A)')
 @click.option('--use-nix', is_flag=True, help='Force use of Nix (fails if Nix not available)')
 @click.option('--use-docker', is_flag=True, help='Force use of Docker (fails if Docker not available)')
@@ -3889,14 +3940,29 @@ def _queue_and_maybe_poll_remote_job(
     show_default=True,
     help='With --remote --poll: max seconds to wait (0 = no limit). Ignored without --poll.',
 )
-def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry_run, remote, poll, git_ref, wait_timeout):
+def harden(
+    macro,
+    project_root,
+    list_designs,
+    list_from_steps,
+    tag,
+    from_step,
+    open_in_openroad,
+    open_in_klayout,
+    pdk,
+    use_nix,
+    use_docker,
+    dry_run,
+    remote,
+    poll,
+    git_ref,
+    wait_timeout,
+):
     """Harden a macro using LibreLane (OpenLane 2).
-    
+
     Examples:
-        cf harden user_proj_example   # Harden a specific macro
-        cf harden user_project_wrapper
-        cf harden --list              # List available macros
-        cf harden user_proj_example --remote
+        cf harden user_proj_example
+        cf harden --list
         cf harden user_proj_example --remote --poll
     """
     from datetime import datetime
@@ -3917,6 +3983,11 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     if remote:
         if list_designs or not macro:
             console.print("[red]✗[/red] --remote requires a macro name (cannot use --list).")
+            raise SystemExit(1)
+        if list_from_steps or from_step or open_in_openroad or open_in_klayout:
+            console.print(
+                "[red]✗[/red] --remote cannot be combined with --from, --list-from-steps, or GUI modes."
+            )
             raise SystemExit(1)
         if not check_project_initialized(project_root_path, 'harden', dry_run=dry_run, allow_graceful=True):
             console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
@@ -3950,7 +4021,7 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     
     # Check if project is initialized (skip check for --list or when no macro specified, allow graceful return)
     if not list_designs and macro:
-        if not check_project_initialized(project_root_path, 'harden', dry_run=dry_run, allow_graceful=True):
+        if not check_project_initialized(project_root_path, 'harden', allow_graceful=True):
             console.print(f"[red]✗[/red] Project not initialized. Please run 'cf init' first.")
             console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
             return
@@ -3963,9 +4034,26 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
         return
     
+    if list_from_steps and not macro:
+        console.print("[red]✗[/red] --list-from-steps requires a macro name")
+        console.print("[yellow]Example:[/yellow] cf harden user_proj_example --list-from-steps")
+        return
+
+    gui_mode_count = int(open_in_openroad) + int(open_in_klayout)
+    if gui_mode_count > 1:
+        console.print("[red]✗[/red] Use only one GUI flag: --open-in-openroad or --open-in-klayout")
+        return
+    if gui_mode_count and from_step:
+        console.print("[red]✗[/red] --from cannot be combined with GUI modes")
+        console.print("[yellow]Use --tag to select which run to open, or omit --tag to use latest run[/yellow]")
+        return
+    if gui_mode_count and list_from_steps:
+        console.print("[red]✗[/red] --list-from-steps cannot be combined with GUI modes")
+        return
+
     # If no macro specified, show prompt with available macros
-    no_macro_specified = not macro and not list_designs
-    if not macro:
+    no_macro_specified = not macro and not list_designs and not list_from_steps
+    if not macro and not list_from_steps:
         list_designs = True
     
     # List designs if requested (or if no macro specified)
@@ -4014,6 +4102,89 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("[red]✗[/red] LibreLane not installed")
         console.print("[yellow]Run 'cf setup --only-openlane' to install LibreLane[/yellow]")
         raise click.Abort()
+
+    # Resolve valid step names for this macro's selected flow using LibreLane itself.
+    def get_valid_from_steps(librelane_python, macro_config, working_dir):
+        script = (
+            "import json, sys\n"
+            "from librelane.config import Config\n"
+            "from librelane.flows import Flow, SequentialFlow\n"
+            "cfg = sys.argv[1]\n"
+            "target = Flow.factory.get('Classic')\n"
+            "meta = Config.get_meta(cfg)\n"
+            "if meta:\n"
+            "    if isinstance(meta.flow, str):\n"
+            "        found = Flow.factory.get(meta.flow)\n"
+            "        if found is None:\n"
+            "            raise RuntimeError(f\"Unknown flow '{meta.flow}' in config metadata\")\n"
+            "        target = found\n"
+            "    elif isinstance(meta.flow, list):\n"
+            "        target = SequentialFlow.make(meta.flow)\n"
+            "    if meta.substituting_steps is not None:\n"
+            "        if meta.flow is None:\n"
+            "            raise RuntimeError('substituting_steps is set but flow is not defined')\n"
+            "        if not issubclass(target, SequentialFlow):\n"
+            "            raise RuntimeError('substituting_steps requires a sequential flow')\n"
+            "        target = target.Substitute(meta.substituting_steps)\n"
+            "steps = []\n"
+            "seen = set()\n"
+            "for step in getattr(target, 'Steps', []) or []:\n"
+            "    step_id = getattr(step, 'id', None)\n"
+            "    if not step_id:\n"
+            "        continue\n"
+            "    if step_id in seen:\n"
+            "        continue\n"
+            "    seen.add(step_id)\n"
+            "    steps.append(step_id)\n"
+            "print(json.dumps({'steps': steps}))\n"
+        )
+        result = subprocess.run(
+            [str(librelane_python), '-c', script, macro_config],
+            cwd=str(working_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or 'unknown error').strip()
+            return None, err
+        try:
+            payload = json.loads(result.stdout.strip())
+            return payload.get('steps', []), None
+        except Exception as exc:
+            return None, str(exc)
+
+    venv_bin = librelane_venv / 'bin'
+    librelane_python = venv_bin / 'python3'
+    valid_from_steps, valid_from_steps_error = get_valid_from_steps(
+        librelane_python=librelane_python,
+        macro_config=config_file,
+        working_dir=openlane_dir,
+    )
+    if valid_from_steps_error:
+        console.print("[red]✗[/red] Failed to load LibreLane step list for this macro")
+        console.print(f"[yellow]Error:[/yellow] {valid_from_steps_error}")
+        console.print("[yellow]Run 'cf setup --only-openlane' to ensure LibreLane is installed correctly[/yellow]")
+        return
+
+    if list_from_steps:
+        console.print(f"[bold cyan]Valid --from steps for {macro}:[/bold cyan]")
+        if valid_from_steps:
+            for step_name in valid_from_steps:
+                console.print(f"  • {step_name}")
+        else:
+            console.print("[yellow]No steps found for this flow[/yellow]")
+        return
+
+    if from_step and from_step not in valid_from_steps:
+        console.print(f"[red]✗[/red] Invalid --from step: {from_step}")
+        matches = difflib.get_close_matches(from_step, valid_from_steps, n=5, cutoff=0.4)
+        if matches:
+            console.print("[yellow]Did you mean:[/yellow]")
+            for m in matches:
+                console.print(f"  • {m}")
+        else:
+            console.print(f"[yellow]Use 'cf harden {macro} --list-from-steps' to see valid step names[/yellow]")
+        return
     
     # Fetch versions from upstream
     console.print("[dim]Fetching version information from cf-cli repository...[/dim]")
@@ -4110,7 +4281,28 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         console.print("[yellow]Run 'cf setup --only-pdk' to install the PDK[/yellow]")
         return
     
-    if not tag:
+    auto_selected_latest_tag = False
+    if (from_step or gui_mode_count) and not tag:
+        runs_dir = macro_dir / 'runs'
+        if not runs_dir.exists():
+            console.print("[red]✗[/red] No existing runs found for this macro")
+            if gui_mode_count:
+                console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
+            else:
+                console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
+            return
+        candidate_runs = [p for p in runs_dir.iterdir() if p.is_dir()]
+        if not candidate_runs:
+            console.print("[red]✗[/red] No existing runs found for this macro")
+            if gui_mode_count:
+                console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
+            else:
+                console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
+            return
+        latest_run = max(candidate_runs, key=lambda p: p.stat().st_mtime)
+        tag = latest_run.name
+        auto_selected_latest_tag = True
+    elif not tag:
         tag = datetime.now().strftime('%y_%m_%d_%H_%M')
     
     # Display configuration
@@ -4118,16 +4310,23 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
     console.print(f"[bold cyan]Hardening: {macro}[/bold cyan]")
     console.print(f"Config: [yellow]{Path(config_file).name}[/yellow]")
     console.print(f"Run tag: [yellow]{tag}[/yellow]")
+    if auto_selected_latest_tag:
+        if gui_mode_count:
+            console.print("[yellow]Using latest existing run tag (auto-selected because GUI mode was requested without --tag)[/yellow]")
+        else:
+            console.print("[yellow]Using latest existing run tag (auto-selected because --from was provided without --tag)[/yellow]")
+    if from_step:
+        console.print(f"Start from: [yellow]{from_step}[/yellow]")
+        console.print("[yellow]Mode:[/yellow] resume from existing state under this tag (no overwrite)")
+    if open_in_openroad:
+        console.print("[yellow]Mode:[/yellow] open existing run in OpenROAD GUI")
+    elif open_in_klayout:
+        console.print("[yellow]Mode:[/yellow] open existing run in KLayout GUI")
     console.print(f"PDK: [yellow]{pdk}[/yellow]")
     console.print(f"PDK Root: [yellow]{pdk_root}[/yellow]")
     console.print(f"Execution: [yellow]{execution_method}[/yellow]")
     console.print("="*60 + "\n")
-    
-    if dry_run:
-        console.print("[bold yellow]Dry run - configuration ready[/bold yellow]")
-        console.print(f"Would use: {execution_method}")
-        return
-    
+
     # Build command based on execution method
     if use_nix:
         # Use Nix to run LibreLane
@@ -4135,22 +4334,30 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         
         cmd = [
             'nix', 'run', f'github:chipfoundry/openlane-2/{openlane_version}', '--',
-            '--run-tag', tag,
             '--manual-pdk',
             '--pdk-root', str(pdk_root),
             '--pdk', pdk,
             '--ef-save-views-to', str(project_root_path),
-            '--overwrite',
-            config_file
+            '--run-tag', tag,
         ]
+        if open_in_openroad:
+            cmd.extend(['--flow', 'OpenInOpenROAD'])
+        elif open_in_klayout:
+            cmd.extend(['--flow', 'OpenInKLayout'])
+        elif not from_step:
+            cmd.append('--overwrite')
+        if from_step:
+            cmd.extend(['--from', from_step])
+        cmd.append(config_file)
         
         env = os.environ.copy()
         env.update({
             'PROJECT_ROOT': str(project_root_path),
             'PDK_ROOT': str(pdk_root),
             'PDK': pdk,
-            'LIBRELANE_RUN_TAG': tag,
         })
+        if tag:
+            env['LIBRELANE_RUN_TAG'] = tag
         
     else:
         # Use Docker via venv
@@ -4162,12 +4369,12 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
             'PROJECT_ROOT': str(project_root_path),
             'PDK_ROOT': str(pdk_root),
             'PDK': pdk,
-            'LIBRELANE_RUN_TAG': tag,
             'PYTHONPATH': str(librelane_venv / 'lib' / f'python{sys.version_info.major}.{sys.version_info.minor}' / 'site-packages')
         })
+        if tag:
+            env['LIBRELANE_RUN_TAG'] = tag
         
         # Add venv to PATH so librelane can find its dependencies
-        venv_bin = librelane_venv / 'bin'
         env['PATH'] = f"{venv_bin}:{env.get('PATH', '')}"
         
         # Build LibreLane command
@@ -4176,7 +4383,6 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
             str(venv_bin / 'python3'), '-m', 'librelane',
             '-m', str(project_root_path),
             '-m', str(pdk_root),
-            '--dockerized',
         ]
         
         # Add --docker-no-tty if not running in a TTY (e.g., CI environments)
@@ -4186,16 +4392,26 @@ def harden(macro, project_root, list_designs, tag, pdk, use_nix, use_docker, dry
         except:
             # If we can't detect TTY, assume non-TTY (safer for CI)
             cmd.append('--docker-no-tty')
-        
+
+        # --docker-no-tty must come before --dockerized
+        cmd.append('--dockerized')
+
         cmd.extend([
-            '--run-tag', tag,
             '--manual-pdk',
             '--pdk-root', str(pdk_root),
             '--pdk', pdk,
             '--ef-save-views-to', str(project_root_path),
-            '--overwrite',
-            config_file
+            '--run-tag', tag,
         ])
+        if open_in_openroad:
+            cmd.extend(['--flow', 'OpenInOpenROAD'])
+        elif open_in_klayout:
+            cmd.extend(['--flow', 'OpenInKLayout'])
+        elif not from_step:
+            cmd.append('--overwrite')
+        if from_step:
+            cmd.extend(['--from', from_step])
+        cmd.append(config_file)
     
     # Run LibreLane
     
