@@ -4429,13 +4429,13 @@ def harden(
         
         if returncode == 0:
             console.print(f"\n[green]✓[/green] [bold green]Successfully hardened {macro}![/bold green]")
-            console.print(f"[dim]Results saved to: {project_root_path}/runs/{macro}/{tag}/[/dim]")
+            console.print(f"[dim]Results saved to: {macro_dir}/runs/{tag}/[/dim]")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
             sys.exit(130)
         else:
             console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {returncode}[/bold red]")
-            console.print(f"[yellow]Check logs in: {project_root_path}/runs/{macro}/{tag}/[/yellow]")
+            console.print(f"[yellow]Check logs in: {macro_dir}/runs/{tag}/[/yellow]")
             sys.exit(returncode)
             
     except KeyboardInterrupt:
