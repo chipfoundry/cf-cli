@@ -3604,13 +3604,17 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                         capture_output=True
                     )
                     # Install from GitHub source (workaround: PyPI package is under efabless, we use chipfoundry repo)
+                    env = os.environ.copy()
+                    if sys.platform == 'darwin':
+                        env['LDSHARED'] = 'clang++ -dynamiclib -undefined dynamic_lookup'
                     subprocess.run(
                         [
                             venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir',
                             'git+https://github.com/chipfoundry/caravel-sim-infrastructure.git@main#subdirectory=cocotb'
                         ],
                         check=True,
-                        capture_output=True
+                        capture_output=True,
+                        env=env
                     )
                     console.print("[green]✓[/green] Cocotb environment set up successfully")
                 
