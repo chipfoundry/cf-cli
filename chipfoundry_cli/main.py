@@ -3764,6 +3764,7 @@ def _queue_and_maybe_poll_remote_job(
     poll: bool,
     wait_timeout: int,
     label: str,
+    results_key: str = "",
 ) -> None:
     """POST a remote platform job and optionally poll until terminal status."""
     import time
@@ -3816,11 +3817,14 @@ def _queue_and_maybe_poll_remote_job(
             console.print(f"[cyan]Queued {label.lower()}[/cyan] job_id={jid} status={st0}")
         if job.get("status") == "failed" and job.get("error_message"):
             console.print(f"[red]✗[/red] {job['error_message']}")
+            console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
             raise SystemExit(1)
         if job.get("status") == "completed":
             console.print(f"[green]✓[/green] {label} completed")
             if job.get("github_pr_url"):
                 console.print(f"  Pull request: {job['github_pr_url']}")
+            if results_key and _assistant_job_failed(job, results_key):
+                console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
             return
         if not poll:
             console.print(
@@ -3891,8 +3895,11 @@ def _queue_and_maybe_poll_remote_job(
             console.print(f"[green]✓[/green] {label} completed")
             if github_pr_url:
                 console.print(f"  Pull request: {github_pr_url}")
+            if results_key and _assistant_job_failed(j2, results_key):
+                console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
         elif terminal == "failed":
             console.print(f"[red]✗[/red] {label} failed: {fail_message}")
+            console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
             raise SystemExit(1)
     except SystemExit:
         raise
@@ -4016,6 +4023,7 @@ def harden(
             poll=poll,
             wait_timeout=wait_timeout,
             label="Remote PNR",
+            results_key="pnr_results",
         )
         return
     
@@ -4721,11 +4729,14 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
                 console.print(f"[cyan]Queued remote precheck[/cyan] job_id={jid} status={st0}")
             if job.get("status") == "failed" and job.get("error_message"):
                 console.print(f"[red]✗[/red] {job['error_message']}")
+                console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
                 raise SystemExit(1)
             if job.get("status") == "completed":
                 console.print("[green]✓[/green] Remote precheck completed")
                 if job.get("github_pr_url"):
                     console.print(f"  Pull request: {job['github_pr_url']}")
+                if _assistant_job_failed(job, "precheck_results"):
+                    console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
                 return
             if not poll:
                 console.print(
@@ -4802,8 +4813,11 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
                 console.print("[green]✓[/green] Remote precheck completed")
                 if github_pr_url:
                     console.print(f"  Pull request: {github_pr_url}")
+                if _assistant_job_failed(j2, "precheck_results"):
+                    console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
             elif terminal == "failed":
                 console.print(f"[red]✗[/red] Remote precheck failed: {fail_message}")
+                console.print("[dim]Analyze this run with [bold]cf analyze[/bold].[/dim]")
                 raise SystemExit(1)
         except SystemExit:
             raise
@@ -5036,6 +5050,7 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
             poll=poll,
             wait_timeout=wait_timeout,
             label="Remote simulation",
+            results_key="simulation_results",
         )
         return
     
@@ -5743,6 +5758,149 @@ def whoami_cmd():
         if stored_email:
             console.print(f"  Last known user: {stored_email}")
         raise SystemExit(1)
+
+
+def _assistant_job_failed(job, results_key: str) -> bool:
+    if not isinstance(job, dict):
+        return False
+    status = (job.get("status") or "").lower()
+    if status in {"queued", "starting", "running"}:
+        return False
+    if status == "failed":
+        return True
+    results = job.get(results_key) or {}
+    if not isinstance(results, dict):
+        return False
+    if results.get("all_checks_passed") is False or results.get("checks_all_passed") is False:
+        return True
+    checks = results.get("checks") or {}
+    if isinstance(checks, dict):
+        for value in checks.values():
+            if isinstance(value, dict) and str(value.get("status") or "").lower() in {"fail", "failed"}:
+                return True
+            if isinstance(value, dict) and value.get("passed") is False:
+                return True
+    failed_tests = results.get("tests_failed")
+    return isinstance(failed_tests, int) and failed_tests > 0
+
+
+def _pick_latest_failed_run(project: dict):
+    candidates = []
+    pre = project.get("latest_remote_precheck_job")
+    if _assistant_job_failed(pre, "precheck_results"):
+        candidates.append(("precheck", pre["id"], pre.get("completed_at") or pre.get("created_at") or ""))
+    pnr = project.get("latest_pnr_job")
+    if _assistant_job_failed(pnr, "pnr_results"):
+        candidates.append(("pnr", pnr["id"], pnr.get("completed_at") or pnr.get("created_at") or ""))
+    sim = project.get("latest_simulation_job")
+    if _assistant_job_failed(sim, "simulation_results"):
+        candidates.append(("simulation", sim["id"], sim.get("completed_at") or sim.get("created_at") or ""))
+    if project.get("tapeout_state_id") and any(
+        isinstance(c, dict) and c.get("passed") is False for c in (project.get("drc_checks") or [])
+    ):
+        candidates.append(("tapeout", project["tapeout_state_id"], project.get("drc_completed_at") or ""))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: row[2] or "", reverse=True)
+    return candidates[0]
+
+
+@main.command('analyze')
+@click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
+@click.option('--job-type', type=click.Choice(['precheck', 'pnr', 'simulation', 'tapeout']), help='Run kind to analyze')
+@click.option('--job-id', help='Specific job or tapeout-state UUID')
+@click.option('--question', help='Ask a follow-up in the new conversation instead of entering interactive mode')
+def analyze_cmd(project_root, job_type, job_id, question):
+    """Analyze a failed remote precheck, PnR, simulation, or tapeout run with AI."""
+    import httpx
+
+    cwd_root, _ = get_project_json_from_cwd()
+    if not project_root and cwd_root:
+        project_root = cwd_root
+    if not project_root:
+        project_root = os.getcwd()
+    platform_id = _load_project_platform_id(str(project_root))
+    if not platform_id:
+        console.print("[red]✗[/red] Link this repo with [bold]cf link[/bold] first.")
+        raise SystemExit(1)
+
+    config = load_user_config()
+    api_key = config.get('api_key')
+    if not api_key:
+        console.print("[yellow]Not logged in.[/yellow] Run [bold]cf login[/bold] first.")
+        raise SystemExit(1)
+    api_url = _get_api_url()
+    client = httpx.Client(
+        base_url=f"{api_url}/api/v1",
+        headers={'Authorization': f'Bearer {api_key}', 'User-Agent': _cf_user_agent()},
+        timeout=180.0,
+    )
+    try:
+        proj_resp = client.get(f"/projects/{platform_id}")
+        if proj_resp.status_code == 401:
+            console.print("[red]✗[/red] API key is invalid or expired. Run [bold]cf login[/bold].")
+            raise SystemExit(1)
+        if not proj_resp.is_success:
+            console.print(f"[red]✗[/red] {_format_api_error(proj_resp)}")
+            raise SystemExit(1)
+        project = proj_resp.json()
+        kind = job_type
+        run_id = job_id
+        if not kind or not run_id:
+            picked = _pick_latest_failed_run(project)
+            if not picked:
+                console.print("[red]✗[/red] No failed remote precheck, PnR, simulation, or DRC run found.")
+                raise SystemExit(1)
+            kind, run_id, _ = picked
+        console.print(f"[cyan]Analyzing[/cyan] {kind} {run_id} …")
+        created = client.post(
+            f"/projects/{platform_id}/assistant/conversations",
+            json={"run_kind": kind, "run_id": run_id},
+        )
+        if not created.is_success:
+            console.print(f"[red]✗[/red] {_format_api_error(created)}")
+            raise SystemExit(1)
+        convo = created.json()
+        remaining = convo.get("remaining_cents", 0)
+        for msg in convo.get("messages") or []:
+            if msg.get("role") == "assistant":
+                console.print(msg.get("content") or "")
+        console.print(f"[dim]Quota remaining ${remaining / 100:.2f}[/dim]")
+        conversation_id = convo["id"]
+
+        def _ask(text: str):
+            follow = client.post(
+                f"/projects/{platform_id}/assistant/conversations/{conversation_id}/messages",
+                json={"content": text},
+            )
+            if not follow.is_success:
+                console.print(f"[red]✗[/red] {_format_api_error(follow)}")
+                raise SystemExit(1)
+            data = follow.json()
+            for msg in data.get("messages") or []:
+                pass
+            assistant = None
+            for msg in data.get("messages") or []:
+                if msg.get("role") == "assistant":
+                    assistant = msg
+            if assistant:
+                console.print(assistant.get("content") or "")
+            left = data.get("remaining_cents", 0)
+            console.print(f"[dim]Quota remaining ${left / 100:.2f}[/dim]")
+
+        if question:
+            _ask(question)
+            return
+        while True:
+            try:
+                nxt = input("Ask a follow-up (empty to exit): ").strip()
+            except EOFError:
+                break
+            if not nxt or nxt.lower() in {"q", "quit", "exit"}:
+                break
+            _ask(nxt)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":
