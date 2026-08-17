@@ -25,6 +25,7 @@ class TestAllCommands:
         'harden',
         'precheck',
         'verify',
+        'analyze',
     ]
     
     def test_main_help_shows_all_commands(self):
