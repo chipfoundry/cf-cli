@@ -3,7 +3,12 @@ Unit tests for cf push command.
 """
 import pytest
 from click.testing import CliRunner
-from chipfoundry_cli.main import main
+from chipfoundry_cli.main import (
+    _assert_wrapper_hash_unchanged,
+    _ordered_sftp_uploads,
+    _prepared_wrapper_hash,
+    main,
+)
 from pathlib import Path
 import tempfile
 import shutil
@@ -69,6 +74,48 @@ class TestPushCommand:
         
         # Should fail without proper setup, but options should be recognized
         assert result.exit_code != 0 or 'dry-run' in result.output.lower()
+
+
+def test_sftp_uploads_project_json_last():
+    uploads = _ordered_sftp_uploads({
+        ".cf/project.json": "/tmp/project.json",
+        "verilog/rtl/user_defines.v": "/tmp/user_defines.v",
+        "gds/user_project_wrapper.gds": "/tmp/user_project_wrapper.gds",
+    })
+
+    assert [item[0] for item in uploads] == [
+        "verilog/rtl/user_defines.v",
+        "gds/user_project_wrapper.gds",
+        ".cf/project.json",
+    ]
+
+
+def test_sftp_uploads_require_project_json():
+    with pytest.raises(ValueError, match="requires .cf/project.json"):
+        _ordered_sftp_uploads({"gds/user_project_wrapper.gds": "/tmp/wrapper.gds"})
+
+
+def test_prepared_wrapper_hash_is_required(tmp_path):
+    config = tmp_path / "project.json"
+    config.write_text('{"project": {}}')
+
+    with pytest.raises(ValueError, match="user_project_wrapper_hash"):
+        _prepared_wrapper_hash(str(config))
+
+
+def test_prepared_wrapper_hash_reads_project_json(tmp_path):
+    config = tmp_path / "project.json"
+    config.write_text('{"project": {"user_project_wrapper_hash": "abc123"}}')
+
+    assert _prepared_wrapper_hash(str(config)) == "abc123"
+
+
+def test_wrapper_hash_change_aborts_before_project_json(tmp_path):
+    wrapper = tmp_path / "user_project_wrapper.gds"
+    wrapper.write_bytes(b"new bytes")
+
+    with pytest.raises(RuntimeError, match="project.json was not uploaded"):
+        _assert_wrapper_hash_unchanged(str(wrapper), "stale-hash")
 
 
 if __name__ == '__main__':
