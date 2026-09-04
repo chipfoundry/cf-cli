@@ -1735,6 +1735,39 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _ordered_sftp_uploads(upload_map: dict) -> list:
+    """Return payload files first and project.json last as the commit marker."""
+    config_path = upload_map.get(".cf/project.json")
+    if not config_path:
+        raise ValueError("SFTP push requires .cf/project.json")
+    payloads = [
+        (rel_path, local_path)
+        for rel_path, local_path in upload_map.items()
+        if rel_path != ".cf/project.json" and local_path
+    ]
+    payloads.append((".cf/project.json", config_path))
+    return payloads
+
+
+def _prepared_wrapper_hash(project_json_path: str) -> str:
+    with open(project_json_path, "r") as f:
+        data = json.load(f)
+    value = str((data.get("project") or {}).get("user_project_wrapper_hash") or "").strip()
+    if not value:
+        raise ValueError("project.json is missing project.user_project_wrapper_hash")
+    return value
+
+
+def _assert_wrapper_hash_unchanged(wrapper_path: str, expected_hash: str) -> None:
+    current_hash = _sha256_file(Path(wrapper_path))
+    if current_hash != expected_hash:
+        raise RuntimeError(
+            "Wrapper GDS changed while it was being uploaded. "
+            "project.json was not uploaded; stop any process modifying the GDS "
+            "and run cf push --force-overwrite again."
+        )
+
+
 def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, str]]:
     """Return [(rel_path, abs_path, size, kind)] for files the platform
     accepts via --https.
@@ -2111,17 +2144,22 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
     cf_dir = ensure_cf_directory(project_root)
     
     # Find the GDS file path for hash calculation
-    gds_path = None
-    for gds_key, gds_path in collected.items():
+    wrapper_path = None
+    for gds_key, local_path in collected.items():
         if gds_key.startswith("gds/"):
+            wrapper_path = local_path
             break
+    if not wrapper_path:
+        console.print("[red]No wrapper GDS found in collected project files.[/red]")
+        raise click.Abort()
     
     project_json_path = update_or_create_project_json(
         cf_dir=str(cf_dir),
-        gds_path=gds_path,
+        gds_path=wrapper_path,
         cli_overrides=cli_overrides,
         existing_json_path=collected.get(".cf/project.json")
     )
+    prepared_wrapper_hash = _prepared_wrapper_hash(project_json_path)
 
     # SFTP upload or dry-run
     final_project_name = project_name or (
@@ -2135,16 +2173,14 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         upload_map["verilog/rtl/user_defines.v"] = collected.get("verilog/rtl/user_defines.v")
 
     # Add the appropriate GDS file based on what was collected
-    for gds_key, gds_path in collected.items():
+    for gds_key, local_path in collected.items():
         if gds_key.startswith("gds/"):
-            upload_map[gds_key] = gds_path
+            upload_map[gds_key] = local_path
     
     if dry_run:
         console.print("[bold]Files to upload:[/bold]")
-        for rel_path, local_path in upload_map.items():
-            if local_path:
-                remote_path = os.path.join(sftp_base, rel_path)
-                console.print(f"  {os.path.basename(local_path)} → {rel_path}")
+        for rel_path, local_path in _ordered_sftp_uploads(upload_map):
+            console.print(f"  {os.path.basename(local_path)} → {rel_path}")
         return
 
     console.print(f"Connecting to {sftp_host}...")
@@ -2163,15 +2199,16 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
         raise click.Abort()
     
     try:
-        for rel_path, local_path in upload_map.items():
-            if local_path:
-                remote_path = os.path.join(sftp_base, rel_path)
-                upload_with_progress(
-                    sftp,
-                    local_path=local_path,
-                    remote_path=remote_path,
-                    force_overwrite=force_overwrite
-                )
+        for rel_path, local_path in _ordered_sftp_uploads(upload_map):
+            if rel_path == ".cf/project.json":
+                _assert_wrapper_hash_unchanged(wrapper_path, prepared_wrapper_hash)
+            remote_path = os.path.join(sftp_base, rel_path)
+            upload_with_progress(
+                sftp,
+                local_path=local_path,
+                remote_path=remote_path,
+                force_overwrite=force_overwrite
+            )
         console.print(f"[green]✓ Uploaded to {sftp_base}[/green]")
         
     except Exception as e:
