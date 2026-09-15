@@ -3801,8 +3801,12 @@ def _queue_and_maybe_poll_remote_job(
     poll: bool,
     wait_timeout: int,
     label: str,
-) -> None:
-    """POST a remote platform job and optionally poll until terminal status."""
+):
+    """POST a remote platform job and optionally poll until terminal status.
+
+    Returns the create-response job dict, or the last GET payload when polling
+    completes. Returns None for dry-run.
+    """
     import time
     from urllib.parse import urlencode
 
@@ -3810,7 +3814,7 @@ def _queue_and_maybe_poll_remote_job(
 
     if dry_run:
         console.print(f"[cyan]Would POST[/cyan] {create_path}?" + urlencode(params))
-        return
+        return None
     if poll and wait_timeout < 0:
         console.print(
             "[red]✗[/red] --wait-timeout must be >= 0 (0 means no limit while polling)."
@@ -3858,13 +3862,13 @@ def _queue_and_maybe_poll_remote_job(
             console.print(f"[green]✓[/green] {label} completed")
             if job.get("github_pr_url"):
                 console.print(f"  Pull request: {job['github_pr_url']}")
-            return
+            return job
         if not poll:
             console.print(
                 f"[dim]Not waiting: use [bold]--remote --poll[/bold] to stream progress "
                 f"([bold]--wait-timeout 0[/bold] = no time limit while polling).[/dim]"
             )
-            return
+            return job
         deadline = None if wait_timeout == 0 else time.monotonic() + wait_timeout
         if wait_timeout == 0:
             console.print("[dim]Polling until the job completes (no timeout).[/dim]")
@@ -3928,6 +3932,7 @@ def _queue_and_maybe_poll_remote_job(
             console.print(f"[green]✓[/green] {label} completed")
             if github_pr_url:
                 console.print(f"  Pull request: {github_pr_url}")
+            return j2
         elif terminal == "failed":
             console.print(f"[red]✗[/red] {label} failed: {fail_message}")
             raise SystemExit(1)
@@ -5780,6 +5785,11 @@ def whoami_cmd():
         if stored_email:
             console.print(f"  Last known user: {stored_email}")
         raise SystemExit(1)
+
+
+from chipfoundry_cli.preview import register_preview
+
+register_preview(main)
 
 
 if __name__ == "__main__":
