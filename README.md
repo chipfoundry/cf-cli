@@ -381,6 +381,61 @@ cf gpio-config --project-root /path/to/project
 > [!NOTE]
 > Invalid modes cannot be saved. All GPIOs must have valid configurations.
 
+### Configure an Openframe Project (GPIO pads and power domains)
+
+On openframe projects (`project.type: openframe`), `cf gpio-config` opens a 44-pad grid instead of the
+caravel editor. It edits the `project.openframe` block in `.cf/project.json` and regenerates:
+
+- `verilog/rtl/openframe_gpio.v`: one `CF_gpio_config` instance per pad, with named user ports
+  (instantiated by `openframe_project_wrapper.v`; do not edit).
+- `openlane/openframe_project_wrapper/power.json`: `VDD_NETS`, `GND_NETS` and `PDN_MACRO_CONNECTIONS`
+  for the wrapper PDN (LibreLane 3.x variable names).
+
+Grid keys: arrows move, `Space` selects, `Enter` edits the selected pads (mode, signal, bit, overrides),
+`u` cycles the mode for unlisted pads, `p` edits power domains and macros, `d` validates and saves,
+`q` quits without saving. Selecting several pads and giving a signal name assigns consecutive bits.
+
+```bash
+cf gpio-config                          # interactive grid
+cf gpio-config --view                   # print the current pinout
+cf openframe validate                   # validate project.openframe
+cf openframe generate                   # regenerate openframe_gpio.v and power.json
+cf openframe generate --check           # CI: exit 1 if generated files are stale
+cf openframe export pinout.yaml         # standalone YAML or JSON (by extension or --format)
+cf openframe import pinout.yaml         # validate, store in .cf/project.json and regenerate
+cf openframe import pinout.yaml --force # replace a different existing spec
+```
+
+Spec format (`schema_version: 1`, JSON Schema in `chipfoundry_cli/openframe/openframe.schema.json`):
+
+```yaml
+schema_version: 1
+gpio:
+  unused_mode: analog          # optional: analog | input_pd | input_pu; if omitted, all 44 pads must be listed
+  pads:
+    - {pad: 0, mode: input, signal: clk}
+    - {pad: 1, mode: input_pu, signal: rst}
+    - {pad: 2, mode: output, signal: out, bit: 0}
+    # ...
+    - {pad: 12, mode: output, signal: out, bit: 10}
+    - {pad: 20, mode: bidir, signal: sda, overrides: {slow: 1, vtrip: 1}}
+power:
+  domains: [vccd1]             # from vccd1, vccd2, vdda1, vdda2; the first is the primary domain
+  macros:
+    - {instance: mprj, domain: vccd1, vdd_pin: vccd1, gnd_pin: vssd1}
+```
+
+- Modes map to `CF_gpio_config` `MODE`: `analog`=0, `input`=1, `input_pd`=2, `input_pu`=3, `output`=4, `bidir`=5.
+- Pads with the same `signal` form a bus; `bit` indices must be unique and contiguous from 0, and all pads of a
+  signal must share a direction. A `bidir` signal `x` becomes ports `x_in`, `x_out` and `x_oeb`.
+- `output`/`bidir` pads need a signal; `analog` pads cannot have one (use `analog_io[n]` on the wrapper).
+- `overrides` (`slow`, `vtrip`, `ib_mode`, `holdover`, `analog_en`, `analog_sel`, `analog_pol`, each 0 or 1)
+  require `CF_gpio_config` v1.2.0 or later.
+- Invalid specs are rejected with every problem listed; nothing is generated from an invalid spec.
+
+`cf init` on an openframe project seeds `project.openframe` from the template's `.cf/openframe_default.json`
+when the project has no spec yet.
+
 ### Harden a Macro
 
 ```bash
