@@ -3,7 +3,7 @@ Unit tests for cf harden command.
 """
 import pytest
 from click.testing import CliRunner
-from chipfoundry_cli.main import main
+from chipfoundry_cli.main import STEP_LIST_MARKER, main, parse_step_list_output
 from pathlib import Path
 import tempfile
 import shutil
@@ -87,3 +87,14 @@ class TestHardenCommand:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestStepListProbe:
+    def test_ignores_terminal_escapes(self):
+        # LibreLane 3 restores the cursor on stdout at exit when attached to a terminal.
+        out = STEP_LIST_MARKER + '{"steps": ["Verilator.Lint", "Yosys.Synthesis"]}\n\x1b[?25h'
+        assert parse_step_list_output(out) == ["Verilator.Lint", "Yosys.Synthesis"]
+
+    def test_missing_marker_is_an_error(self):
+        with pytest.raises(ValueError, match="step list not found"):
+            parse_step_list_output('{"steps": []}')

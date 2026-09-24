@@ -47,6 +47,20 @@ DEFAULT_SFTP_HOST = 'sftp.chipfoundry.io'
 
 console = Console()
 
+# LibreLane 3 writes terminal control sequences (e.g. cursor restore) to stdout on exit,
+# so the step-list probe tags its JSON line instead of owning the whole stream.
+STEP_LIST_MARKER = "CF_STEP_LIST_JSON:"
+
+
+def parse_step_list_output(stdout: str) -> List[str]:
+    """Extract the step list printed by the `cf harden` LibreLane probe."""
+    for line in stdout.splitlines():
+        idx = line.find(STEP_LIST_MARKER)
+        if idx != -1:
+            return json.loads(line[idx + len(STEP_LIST_MARKER):])['steps']
+    raise ValueError(f"LibreLane step list not found in probe output: {stdout.strip()[:500]!r}")
+
+
 class CategorizedCommand(click.Command):
     """Click command with categorized help sections for options."""
 
@@ -4185,7 +4199,7 @@ def harden(
             "        continue\n"
             "    seen.add(step_id)\n"
             "    steps.append(step_id)\n"
-            "print(json.dumps({'steps': steps}))\n"
+            f"print({STEP_LIST_MARKER!r} + json.dumps({{'steps': steps}}))\n"
         )
         result = subprocess.run(
             [str(librelane_python), '-c', script, macro_config],
@@ -4197,8 +4211,7 @@ def harden(
             err = (result.stderr or result.stdout or 'unknown error').strip()
             return None, err
         try:
-            payload = json.loads(result.stdout.strip())
-            return payload.get('steps', []), None
+            return parse_step_list_output(result.stdout), None
         except Exception as exc:
             return None, str(exc)
 
