@@ -9,6 +9,7 @@ from chipfoundry_cli.remote_precheck_git import (
     verify_remote_precheck_repo,
 )
 from chipfoundry_cli.version_check import maybe_warn_outdated
+from chipfoundry_cli.openframe.cli import register_openframe, run_openframe_gpio_config, seed_openframe_spec
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
@@ -593,6 +594,8 @@ def init(project_root, shuttle, description):
         proj['github_repo_url'] = github_repo_url
     else:
         proj.pop('github_repo_url', None)
+    if project_type == 'openframe':
+        seed_openframe_spec(Path(project_root), proj)
 
     if not api_key:
         with open(project_json_path, 'w') as f:
@@ -728,7 +731,12 @@ def init(project_root, shuttle, description):
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
 @click.option('--view', is_flag=True, help='Display current GPIO configuration summary without editing.')
 def gpio_config(project_root, view):
-    """Configure GPIO settings interactively and save to project config and user_defines.v."""
+    """Configure GPIO settings interactively.
+
+    Caravel/caravan: saves project.gpio_config and updates user_defines.v.
+    Openframe: edits project.openframe (pad modes, signals, overrides, power) and
+    regenerates verilog/rtl/openframe_gpio.v and the wrapper power.json.
+    """
     if not project_root:
         project_root = os.getcwd()
     
@@ -780,11 +788,10 @@ def gpio_config(project_root, view):
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
     
-    # For openframe, GPIO config is not needed
+    # Openframe uses the project.openframe spec and generated openframe_gpio.v, not user_defines.v
     if project_type == 'openframe':
-        console.print("[red]GPIO configuration is not available for openframe projects.[/red]")
-        console.print("[yellow]Openframe projects do not use user_defines.v.[/yellow]")
-        raise click.Abort()
+        run_openframe_gpio_config(project_root, project_json_path, view)
+        return
     
     user_defines_path = project_root / 'verilog' / 'rtl' / 'user_defines.v'
     
@@ -5790,6 +5797,7 @@ def whoami_cmd():
 from chipfoundry_cli.preview import register_preview
 
 register_preview(main)
+register_openframe(main)
 
 
 if __name__ == "__main__":

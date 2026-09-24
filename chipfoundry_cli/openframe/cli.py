@@ -1,0 +1,247 @@
+"""`cf openframe ...` commands and the openframe branch of `cf gpio-config`."""
+
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from chipfoundry_cli.openframe.generate import stale_outputs, write_outputs
+from chipfoundry_cli.openframe.spec import (
+    OpenframeSpec,
+    SpecError,
+    _format_ranges,
+    load_spec_from_project,
+    normalize_spec,
+    read_spec_file,
+    validate_spec,
+    write_spec_file,
+)
+from chipfoundry_cli.utils import (
+    CF_PROJECT_JSON_REL,
+    get_openframe_spec_from_project_json,
+    load_project_json,
+    save_openframe_spec_to_project_json,
+)
+
+console = Console()
+
+# Seed file shipped by the openframe_user_project template; `cf init` imports it once.
+OPENFRAME_SEED_REL = ".cf/openframe_default.json"
+
+
+def _print_spec_error(err: SpecError) -> None:
+    console.print("[red]✗ Invalid openframe spec:[/red]")
+    for msg in err.errors:
+        console.print(f"  [red]-[/red] {msg}")
+
+
+def _project_root(project_root: Optional[str]) -> Path:
+    return Path(project_root).resolve() if project_root else Path.cwd()
+
+
+def _require_openframe_project(root: Path) -> Path:
+    project_json = root / CF_PROJECT_JSON_REL
+    if not project_json.exists():
+        console.print(f"[red]✗ {project_json} not found. Run 'cf init' first.[/red]")
+        raise click.Abort()
+    project_type = load_project_json(str(project_json)).get("project", {}).get("type")
+    if project_type != "openframe":
+        console.print(
+            f"[red]✗ This command is for openframe projects; project.type in {project_json} is '{project_type}'.[/red]"
+        )
+        raise click.Abort()
+    return project_json
+
+
+def _load_or_abort(root: Path) -> OpenframeSpec:
+    try:
+        return load_spec_from_project(root)
+    except SpecError as e:
+        _print_spec_error(e)
+        raise click.Abort()
+
+
+def print_spec_summary(spec: OpenframeSpec) -> None:
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    table.add_column("Signal", style="cyan")
+    table.add_column("Direction")
+    table.add_column("Pads")
+    table.add_column("Modes")
+    for sig in spec.signals:
+        name = f"{sig.name}[{sig.width - 1}:0]" if sig.width is not None else sig.name
+        modes = sorted({spec.pads[p].mode for p in sig.pads})
+        table.add_row(name, sig.direction, _format_ranges(list(sig.pads)), ", ".join(modes))
+    console.print(table)
+
+    by_mode: Dict[str, list] = {}
+    for pad in spec.pads:
+        if pad.signal is None:
+            label = f"{pad.mode} (unused)" if pad.unused else f"{pad.mode} (no signal)"
+            by_mode.setdefault(label, []).append(pad.pad)
+    for label, pads in by_mode.items():
+        console.print(f"  [dim]{label}:[/dim] {_format_ranges(pads)}")
+    overridden = [p for p in spec.pads if p.overrides]
+    for p in overridden:
+        ov = ", ".join(f"{k}={v}" for k, v in p.overrides.items())
+        console.print(f"  [dim]pad {p.pad} overrides:[/dim] {ov}")
+    macros = ", ".join(f"{m.instance}->{m.domain}" for m in spec.macros) or "none"
+    console.print(f"  [dim]power domains:[/dim] {', '.join(spec.domains)}   [dim]macros:[/dim] {macros}")
+
+
+def _generate(root: Path, spec: OpenframeSpec) -> None:
+    try:
+        changed = write_outputs(root, spec)
+    except FileNotFoundError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise click.Abort()
+    if changed:
+        for rel in changed:
+            console.print(f"[green]✓ Wrote {rel}[/green]")
+    else:
+        console.print("[green]✓ Generated files are up to date[/green]")
+
+
+def seed_openframe_spec(project_root: Path, proj: Dict[str, Any]) -> None:
+    """Import the template's seed spec into ``proj`` when the project has none. Used by `cf init`."""
+    if "openframe" in proj:
+        return
+    seed = Path(project_root) / OPENFRAME_SEED_REL
+    if not seed.exists():
+        console.print(
+            "[dim]No openframe spec yet. Run [bold]cf gpio-config[/bold] or "
+            "[bold]cf openframe import <file>[/bold] to create one.[/dim]"
+        )
+        return
+    try:
+        spec = validate_spec(read_spec_file(seed, "json"))
+    except SpecError as e:
+        console.print(f"[red]✗ {seed} is not a valid openframe spec.[/red]")
+        _print_spec_error(e)
+        raise click.Abort()
+    proj["openframe"] = spec.raw
+    console.print(f"[green]✓ Seeded project.openframe from {OPENFRAME_SEED_REL}[/green]")
+
+
+def run_openframe_gpio_config(project_root: Path, project_json_path: Path, view: bool) -> None:
+    """Openframe branch of `cf gpio-config`: edit project.openframe in a 44-pad grid, then regenerate."""
+    block = get_openframe_spec_from_project_json(str(project_json_path))
+    if view:
+        if block is None:
+            console.print("[yellow]No openframe spec found.[/yellow]")
+            console.print("[dim]Run 'cf gpio-config' to configure GPIOs.[/dim]")
+            return
+        try:
+            spec = validate_spec(block)
+        except SpecError as e:
+            _print_spec_error(e)
+            raise click.Abort()
+        console.print("\n[bold cyan]Openframe GPIO configuration[/bold cyan]")
+        print_spec_summary(spec)
+        return
+
+    from chipfoundry_cli.openframe.tui import OpenframeGridApp
+
+    project_name = load_project_json(str(project_json_path)).get("project", {}).get("name", "")
+    result = OpenframeGridApp(block, project_name).run()
+    if result is None:
+        console.print("[yellow]Quit without saving; .cf/project.json unchanged.[/yellow]")
+        return
+    spec = validate_spec(result)
+    save_openframe_spec_to_project_json(str(project_json_path), spec.raw)
+    console.print(f"[green]✓ Saved project.openframe to {project_json_path}[/green]")
+    print_spec_summary(spec)
+    _generate(project_root, spec)
+
+
+def register_openframe(main_group) -> None:
+    @main_group.group("openframe")
+    def openframe():
+        """Openframe GPIO/power spec: validate, generate RTL and PDN settings, import/export."""
+
+    project_root_opt = click.option(
+        "--project-root",
+        type=click.Path(exists=True, file_okay=False),
+        help="Path to the project directory (defaults to current directory).",
+    )
+
+    @openframe.command("validate")
+    @project_root_opt
+    def validate_cmd(project_root):
+        """Validate project.openframe in .cf/project.json."""
+        root = _project_root(project_root)
+        _require_openframe_project(root)
+        spec = _load_or_abort(root)
+        console.print("[green]✓ project.openframe is valid[/green]")
+        print_spec_summary(spec)
+
+    @openframe.command("generate")
+    @project_root_opt
+    @click.option("--check", is_flag=True, help="Do not write; exit non-zero if generated files are missing or stale.")
+    def generate_cmd(project_root, check):
+        """Generate verilog/rtl/openframe_gpio.v and openlane/openframe_project_wrapper/power.json."""
+        root = _project_root(project_root)
+        _require_openframe_project(root)
+        spec = _load_or_abort(root)
+        if check:
+            stale = stale_outputs(root, spec)
+            if stale:
+                for rel in stale:
+                    console.print(f"[red]✗ {rel} is missing or out of date[/red]")
+                console.print("[yellow]Run 'cf openframe generate' to update.[/yellow]")
+                raise SystemExit(1)
+            console.print("[green]✓ Generated files match project.openframe[/green]")
+            return
+        _generate(root, spec)
+
+    @openframe.command("export")
+    @click.argument("output", type=click.Path(dir_okay=False))
+    @project_root_opt
+    @click.option("--format", "fmt", type=click.Choice(["json", "yaml"]), help="Defaults to the file extension.")
+    def export_cmd(output, project_root, fmt):
+        """Write project.openframe to a standalone YAML or JSON file."""
+        root = _project_root(project_root)
+        _require_openframe_project(root)
+        spec = _load_or_abort(root)
+        try:
+            write_spec_file(output, spec.raw, fmt)
+        except SpecError as e:
+            _print_spec_error(e)
+            raise click.Abort()
+        console.print(f"[green]✓ Exported project.openframe to {output}[/green]")
+
+    @openframe.command("import")
+    @click.argument("input_file", metavar="INPUT", type=click.Path(exists=True, dir_okay=False))
+    @project_root_opt
+    @click.option("--format", "fmt", type=click.Choice(["json", "yaml"]), help="Defaults to the file extension.")
+    @click.option("--force", is_flag=True, help="Replace an existing, different project.openframe block.")
+    @click.option("--generate/--no-generate", "do_generate", default=True, show_default=True,
+                  help="Regenerate RTL and power.json after importing.")
+    def import_cmd(input_file, project_root, fmt, force, do_generate):
+        """Validate a YAML or JSON spec file and store it as project.openframe."""
+        root = _project_root(project_root)
+        project_json = _require_openframe_project(root)
+        try:
+            spec = validate_spec(read_spec_file(input_file, fmt))
+        except SpecError as e:
+            _print_spec_error(e)
+            raise click.Abort()
+        existing = get_openframe_spec_from_project_json(str(project_json))
+        if existing is not None and not force:
+            same = False
+            try:
+                same = normalize_spec(existing) == spec.raw
+            except (KeyError, TypeError):
+                same = False
+            if not same:
+                console.print(
+                    "[red]✗ .cf/project.json already has a different project.openframe block. "
+                    "Re-run with --force to replace it (export it first to keep a copy).[/red]"
+                )
+                raise click.Abort()
+        save_openframe_spec_to_project_json(str(project_json), spec.raw)
+        console.print(f"[green]✓ Imported {input_file} into {project_json}[/green]")
+        print_spec_summary(spec)
+        if do_generate:
+            _generate(root, spec)

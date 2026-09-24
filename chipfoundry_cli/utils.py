@@ -795,3 +795,32 @@ def save_gpio_config_to_project_json(project_json_path: str, gpio_configs: Dict[
     
     data["project"]["gpio_config"] = hex_config
     save_project_json(project_json_path, data)
+
+
+def _no_duplicate_keys(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key '{key}'")
+        out[key] = value
+    return out
+
+
+def get_openframe_spec_from_project_json(project_json_path: str) -> Optional[dict]:
+    """Return the raw project.openframe block, or None if the project has none.
+
+    Duplicate JSON keys raise ValueError instead of silently keeping the last one.
+    """
+    with open(project_json_path, 'r') as f:
+        data = json.load(f, object_pairs_hook=_no_duplicate_keys)
+    return data.get("project", {}).get("openframe")
+
+
+def save_openframe_spec_to_project_json(project_json_path: str, spec_block: dict):
+    """Write the project.openframe block, leaving every other key (including gpio_config) untouched."""
+    if Path(project_json_path).exists():
+        data = load_project_json(project_json_path)
+    else:
+        data = {"project": {}}
+    data.setdefault("project", {})["openframe"] = spec_block
+    save_project_json(project_json_path, data)
