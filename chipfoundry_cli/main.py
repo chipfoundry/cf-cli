@@ -9,7 +9,14 @@ from chipfoundry_cli.remote_precheck_git import (
     verify_remote_precheck_repo,
 )
 from chipfoundry_cli.version_check import maybe_warn_outdated
-from chipfoundry_cli.openframe.cli import register_openframe, run_openframe_gpio_config, seed_openframe_spec
+from chipfoundry_cli.librelane_run import librelane_config_files
+from chipfoundry_cli.openframe.cli import (
+    OPENFRAME_WRAPPER,
+    register_openframe,
+    run_openframe_gpio_config,
+    seed_openframe_spec,
+    warn_openframe_out_of_sync,
+)
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
@@ -4039,6 +4046,13 @@ def harden(
     
     project_root_path = Path(project_root)
 
+    # The wrapper is the only design built from the generated openframe files (openframe_gpio.v, power.json).
+    if (
+        macro == OPENFRAME_WRAPPER
+        and not (list_designs or list_from_steps or open_in_openroad or open_in_klayout)
+    ):
+        warn_openframe_out_of_sync(project_root_path, 'cf harden')
+
     if poll and not remote:
         console.print("[red]✗[/red] --poll requires --remote.")
         raise SystemExit(1)
@@ -4158,6 +4172,7 @@ def harden(
         console.print(f"[red]✗[/red] No config file found for {macro}")
         console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
         return
+    config_files = [str(p) for p in librelane_config_files(Path(config_file))]
     
     # Check for LibreLane venv
     librelane_venv = openlane_dir / '.venv'
@@ -4370,7 +4385,7 @@ def harden(
     # Display configuration
     console.print("\n" + "="*60)
     console.print(f"[bold cyan]Hardening: {macro}[/bold cyan]")
-    console.print(f"Config: [yellow]{Path(config_file).name}[/yellow]")
+    console.print(f"Config: [yellow]{' + '.join(Path(f).name for f in config_files)}[/yellow]")
     console.print(f"Run tag: [yellow]{tag}[/yellow]")
     if auto_selected_latest_tag:
         if gui_mode_count:
@@ -4410,7 +4425,7 @@ def harden(
             cmd.append('--overwrite')
         if from_step:
             cmd.extend(['--from', from_step])
-        cmd.append(config_file)
+        cmd.extend(config_files)
         
         env = os.environ.copy()
         env.update({
@@ -4473,7 +4488,7 @@ def harden(
             cmd.append('--overwrite')
         if from_step:
             cmd.extend(['--from', from_step])
-        cmd.append(config_file)
+        cmd.extend(config_files)
     
     # Run LibreLane
     
@@ -4698,6 +4713,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         return
     
     project_json_path = project_root_path / '.cf' / 'project.json'
+    warn_openframe_out_of_sync(project_root_path, 'cf precheck')
 
     if poll and not remote:
         console.print("[red]✗[/red] --poll requires --remote.")
