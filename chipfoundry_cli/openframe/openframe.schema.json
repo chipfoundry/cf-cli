@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://chipfoundry.io/schemas/openframe/v1.json",
+  "title": "ChipFoundry openframe project spec",
+  "description": "GPIO pad modes and power domains for an openframe_user_project. Stored under project.openframe in .cf/project.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "gpio", "power"],
+  "properties": {
+    "schema_version": {
+      "description": "Version of this schema. Only 1 is defined.",
+      "const": 1
+    },
+    "gpio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pads"],
+      "properties": {
+        "unused_mode": {
+          "description": "Mode given to pads not listed in pads. When omitted, all 44 pads must be listed.",
+          "enum": ["analog", "input_pd", "input_pu"]
+        },
+        "pads": {
+          "type": "array",
+          "maxItems": 44,
+          "items": { "$ref": "#/definitions/pad" }
+        }
+      }
+    },
+    "power": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domains", "macros"],
+      "properties": {
+        "domains": {
+          "description": "Enabled power domains, named by their supply net. The first entry is the primary domain.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["vccd1", "vccd2", "vdda1", "vdda2"] }
+        },
+        "macros": {
+          "description": "Power domain of each user macro instance in openframe_project_wrapper.",
+          "type": "array",
+          "items": { "$ref": "#/definitions/macro" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "bit": {
+      "type": "integer",
+      "enum": [0, 1]
+    },
+    "pad": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pad", "mode"],
+      "properties": {
+        "pad": {
+          "description": "Openframe GPIO pad index.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 43
+        },
+        "mode": {
+          "description": "CF_gpio_config MODE: analog=0, input=1, input_pd=2, input_pu=3, output=4, bidir=5.",
+          "enum": ["analog", "input", "input_pd", "input_pu", "output", "bidir"]
+        },
+        "signal": {
+          "description": "User-facing port name on the generated openframe_gpio module.",
+          "$ref": "#/definitions/identifier"
+        },
+        "bit": {
+          "description": "Bit index within signal. Omit for a 1-bit signal.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 43
+        },
+        "overrides": {
+          "description": "Static pad controls. Each value drives the pad control bit directly. Requires CF_gpio_config v1.2.0.",
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "slow": { "$ref": "#/definitions/bit" },
+            "vtrip": { "$ref": "#/definitions/bit" },
+            "ib_mode": { "$ref": "#/definitions/bit" },
+            "holdover": { "$ref": "#/definitions/bit" },
+            "analog_en": { "$ref": "#/definitions/bit" },
+            "analog_sel": { "$ref": "#/definitions/bit" },
+            "analog_pol": { "$ref": "#/definitions/bit" }
+          }
+        }
+      }
+    },
+    "macro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance", "domain", "vdd_pin", "gnd_pin"],
+      "properties": {
+        "instance": {
+          "description": "Macro instance name in openframe_project_wrapper (hierarchy separated by '/').",
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*$"
+        },
+        "domain": {
+          "enum": ["vccd1", "vccd2", "vdda1", "vdda2"]
+        },
+        "vdd_pin": { "$ref": "#/definitions/identifier" },
+        "gnd_pin": { "$ref": "#/definitions/identifier" }
+      }
+    }
+  }
+}

@@ -9,6 +9,14 @@ from chipfoundry_cli.remote_precheck_git import (
     verify_remote_precheck_repo,
 )
 from chipfoundry_cli.version_check import maybe_warn_outdated
+from chipfoundry_cli.librelane_run import librelane_config_files
+from chipfoundry_cli.openframe.cli import (
+    OPENFRAME_WRAPPER,
+    register_openframe,
+    run_openframe_gpio_config,
+    seed_openframe_spec,
+    warn_openframe_out_of_sync,
+)
 from chipfoundry_cli.utils import (
     collect_project_files, ensure_cf_directory, update_or_create_project_json,
     sftp_connect, upload_with_progress, sftp_ensure_dirs, sftp_download_recursive,
@@ -45,6 +53,20 @@ DEFAULT_SSH_KEY = os.path.expanduser('~/.ssh/chipfoundry-key')
 DEFAULT_SFTP_HOST = 'sftp.chipfoundry.io'
 
 console = Console()
+
+# LibreLane 3 writes terminal control sequences (e.g. cursor restore) to stdout on exit,
+# so the step-list probe tags its JSON line instead of owning the whole stream.
+STEP_LIST_MARKER = "CF_STEP_LIST_JSON:"
+
+
+def parse_step_list_output(stdout: str) -> List[str]:
+    """Extract the step list printed by the `cf harden` LibreLane probe."""
+    for line in stdout.splitlines():
+        idx = line.find(STEP_LIST_MARKER)
+        if idx != -1:
+            return json.loads(line[idx + len(STEP_LIST_MARKER):])['steps']
+    raise ValueError(f"LibreLane step list not found in probe output: {stdout.strip()[:500]!r}")
+
 
 class CategorizedCommand(click.Command):
     """Click command with categorized help sections for options."""
@@ -593,6 +615,8 @@ def init(project_root, shuttle, description):
         proj['github_repo_url'] = github_repo_url
     else:
         proj.pop('github_repo_url', None)
+    if project_type == 'openframe':
+        seed_openframe_spec(Path(project_root), proj)
 
     if not api_key:
         with open(project_json_path, 'w') as f:
@@ -728,7 +752,12 @@ def init(project_root, shuttle, description):
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
 @click.option('--view', is_flag=True, help='Display current GPIO configuration summary without editing.')
 def gpio_config(project_root, view):
-    """Configure GPIO settings interactively and save to project config and user_defines.v."""
+    """Configure GPIO settings interactively.
+
+    Caravel/caravan: saves project.gpio_config and updates user_defines.v.
+    Openframe: edits project.openframe (pad modes, signals, overrides, power) and
+    regenerates verilog/rtl/openframe_gpio.v and the wrapper power.json.
+    """
     if not project_root:
         project_root = os.getcwd()
     
@@ -780,11 +809,10 @@ def gpio_config(project_root, view):
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
     
-    # For openframe, GPIO config is not needed
+    # Openframe uses the project.openframe spec and generated openframe_gpio.v, not user_defines.v
     if project_type == 'openframe':
-        console.print("[red]GPIO configuration is not available for openframe projects.[/red]")
-        console.print("[yellow]Openframe projects do not use user_defines.v.[/yellow]")
-        raise click.Abort()
+        run_openframe_gpio_config(project_root, project_json_path, view)
+        return
     
     user_defines_path = project_root / 'verilog' / 'rtl' / 'user_defines.v'
     
@@ -4018,6 +4046,13 @@ def harden(
     
     project_root_path = Path(project_root)
 
+    # The wrapper is the only design built from the generated openframe files (openframe_gpio.v, power.json).
+    if (
+        macro == OPENFRAME_WRAPPER
+        and not (list_designs or list_from_steps or open_in_openroad or open_in_klayout)
+    ):
+        warn_openframe_out_of_sync(project_root_path, 'cf harden')
+
     if poll and not remote:
         console.print("[red]✗[/red] --poll requires --remote.")
         raise SystemExit(1)
@@ -4137,6 +4172,7 @@ def harden(
         console.print(f"[red]✗[/red] No config file found for {macro}")
         console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
         return
+    config_files = [str(p) for p in librelane_config_files(Path(config_file))]
     
     # Check for LibreLane venv
     librelane_venv = openlane_dir / '.venv'
@@ -4178,7 +4214,7 @@ def harden(
             "        continue\n"
             "    seen.add(step_id)\n"
             "    steps.append(step_id)\n"
-            "print(json.dumps({'steps': steps}))\n"
+            f"print({STEP_LIST_MARKER!r} + json.dumps({{'steps': steps}}))\n"
         )
         result = subprocess.run(
             [str(librelane_python), '-c', script, macro_config],
@@ -4190,8 +4226,7 @@ def harden(
             err = (result.stderr or result.stdout or 'unknown error').strip()
             return None, err
         try:
-            payload = json.loads(result.stdout.strip())
-            return payload.get('steps', []), None
+            return parse_step_list_output(result.stdout), None
         except Exception as exc:
             return None, str(exc)
 
@@ -4350,7 +4385,7 @@ def harden(
     # Display configuration
     console.print("\n" + "="*60)
     console.print(f"[bold cyan]Hardening: {macro}[/bold cyan]")
-    console.print(f"Config: [yellow]{Path(config_file).name}[/yellow]")
+    console.print(f"Config: [yellow]{' + '.join(Path(f).name for f in config_files)}[/yellow]")
     console.print(f"Run tag: [yellow]{tag}[/yellow]")
     if auto_selected_latest_tag:
         if gui_mode_count:
@@ -4390,7 +4425,7 @@ def harden(
             cmd.append('--overwrite')
         if from_step:
             cmd.extend(['--from', from_step])
-        cmd.append(config_file)
+        cmd.extend(config_files)
         
         env = os.environ.copy()
         env.update({
@@ -4453,7 +4488,7 @@ def harden(
             cmd.append('--overwrite')
         if from_step:
             cmd.extend(['--from', from_step])
-        cmd.append(config_file)
+        cmd.extend(config_files)
     
     # Run LibreLane
     
@@ -4678,6 +4713,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         return
     
     project_json_path = project_root_path / '.cf' / 'project.json'
+    warn_openframe_out_of_sync(project_root_path, 'cf precheck')
 
     if poll and not remote:
         console.print("[red]✗[/red] --poll requires --remote.")
@@ -5790,6 +5826,7 @@ def whoami_cmd():
 from chipfoundry_cli.preview import register_preview
 
 register_preview(main)
+register_openframe(main)
 
 
 if __name__ == "__main__":

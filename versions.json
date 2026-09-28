@@ -3,7 +3,7 @@
     "sky130A": "2026.2.9",
     "sky130B": "2026.2.9"
   },
-  "openlane_version": "CI2511",
+  "openlane_version": "CI2609",
   "open_pdks_commits": {
     "sky130A": "3e0e31dcce8519a7dbb82590346db16d91b7244f",
     "sky130B": "3e0e31dcce8519a7dbb82590346db16d91b7244f"
