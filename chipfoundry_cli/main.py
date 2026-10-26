@@ -34,6 +34,7 @@ import sys
 import shutil
 import signal
 import difflib
+import shlex
 
 # Textual imports for GPIO grid UI
 from textual.app import App, ComposeResult
@@ -3754,6 +3755,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             console.print("[bold green]Installation complete![/bold green]")
         else:
             console.print("[bold green]Setup complete![/bold green]")
+        if had_errors:
+            sys.exit(1)
 
 
 def _is_nix_toolchain_noise_line(line: str) -> bool:
@@ -4939,7 +4942,21 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     if skip_checks:
         precheck_args.extend(['--skip-checks'] + list(skip_checks))
     
-    inner_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null && exec cf-precheck ' + ' '.join(precheck_args)
+    # CF_PRECHECK_SOURCE points at a local cf-precheck checkout to test
+    # unreleased changes; otherwise the latest release is installed from PyPI.
+    precheck_source = os.environ.get('CF_PRECHECK_SOURCE')
+    if precheck_source:
+        precheck_source = str(Path(precheck_source).expanduser().resolve())
+        if not (Path(precheck_source) / 'pyproject.toml').is_file():
+            console.print(f"[red]✗[/red] CF_PRECHECK_SOURCE is not a cf-precheck checkout: {precheck_source}")
+            sys.exit(1)
+        install_cmd = (
+            f'cp -r {shlex.quote(precheck_source)} /tmp/cf-precheck-src && '
+            'pip3 install -q --root-user-action=ignore /tmp/cf-precheck-src'
+        )
+    else:
+        install_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null'
+    inner_cmd = install_cmd + ' && exec cf-precheck ' + ' '.join(precheck_args)
     
     docker_cmd = [
         'docker', 'run', '--rm', '--init',
@@ -4949,6 +4966,8 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     ]
     if golden_root != '/opt/caravel' and not golden_root.startswith(f'{project_root_path}/'):
         docker_cmd += ['-v', f'{golden_root}:{golden_root}']
+    if precheck_source:
+        docker_cmd += ['-v', f'{precheck_source}:{precheck_source}:ro']
     docker_cmd += [
         '-e', f'PDK_ROOT={pdk_root}',
         '-e', f'PDK_PATH={pdk_path}',
@@ -4962,6 +4981,8 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     console.print("[bold cyan]CF Precheck[/bold cyan]")
     console.print(f"Project: [yellow]{project_root_path}[/yellow]")
     console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    if precheck_source:
+        console.print(f"cf-precheck: [yellow]{precheck_source}[/yellow] (CF_PRECHECK_SOURCE)")
     if skip_checks:
         console.print(f"Skipping: [yellow]{', '.join(skip_checks)}[/yellow]")
     if magic_drc:

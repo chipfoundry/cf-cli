@@ -133,6 +133,23 @@ class TestSetup:
         assert "tag: DW2026.1" in result.output.replace("\n", "")
 
 
+    def test_setup_fails_when_a_step_fails(self, tmp_path: Path, monkeypatch):
+        import subprocess
+
+        _write_project_json(tmp_path)
+        monkeypatch.setattr(cf_main, "fetch_versions_from_upstream", lambda *a, **k: FAKE_VERSIONS)
+
+        def failing_run(cmd, *args, **kwargs):
+            raise subprocess.CalledProcessError(128, cmd, stderr="clone failed")
+
+        monkeypatch.setattr(cf_main.subprocess, "run", failing_run)
+        result = CliRunner().invoke(
+            main, ["setup", "--project-root", str(tmp_path), "--only-timing"]
+        )
+        assert result.exit_code == 1, result.output
+        assert "Setup completed with errors" in result.output
+
+
 class TestPrecheck:
     def test_precheck_uses_harness_as_golden_root(self, dw_project: Path, monkeypatch):
         monkeypatch.setattr(cf_main.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -168,6 +185,29 @@ class TestPrecheck:
         assert result.exit_code == 1
         assert "harness not found" in result.output
         assert "cf setup --only-caravel" in result.output
+
+    def test_precheck_local_source(self, dw_project: Path, tmp_path_factory, monkeypatch):
+        src = tmp_path_factory.mktemp("cf-precheck")
+        (src / "pyproject.toml").write_text("[project]\nname = 'cf-precheck'\n")
+        monkeypatch.setenv("CF_PRECHECK_SOURCE", str(src))
+        monkeypatch.setattr(cf_main.shutil, "which", lambda name: f"/usr/bin/{name}")
+        result = CliRunner().invoke(
+            main, ["precheck", "--project-root", str(dw_project), "--dry-run"]
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output.replace("\n", "")
+        assert f"-v {src.resolve()}:{src.resolve()}:ro" in out
+        assert f"pip3 install -q --root-user-action=ignore /tmp/cf-precheck-src" in out
+        assert "--upgrade -q --root-user-action=ignore cf-precheck" not in out
+
+    def test_precheck_rejects_bad_local_source(self, dw_project: Path, tmp_path, monkeypatch):
+        monkeypatch.setenv("CF_PRECHECK_SOURCE", str(tmp_path / "missing"))
+        monkeypatch.setattr(cf_main.shutil, "which", lambda name: f"/usr/bin/{name}")
+        result = CliRunner().invoke(
+            main, ["precheck", "--project-root", str(dw_project), "--dry-run"]
+        )
+        assert result.exit_code == 1
+        assert "not a cf-precheck checkout" in result.output
 
     def test_precheck_fails_without_pdk(self, dw_project: Path, monkeypatch):
         (dw_project / "dependencies" / "pdks" / "sky130A").rmdir()
