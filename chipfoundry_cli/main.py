@@ -4075,7 +4075,7 @@ def harden(
             wait_timeout=wait_timeout,
             label="Remote PNR",
         )
-        return
+        sys.exit(1)
     
     # Check if project is initialized (skip check for --list or when no macro specified, allow graceful return)
     if not list_designs and macro:
@@ -4090,24 +4090,26 @@ def harden(
     if not openlane_dir.exists():
         console.print(f"[red]✗[/red] OpenLane directory not found: {openlane_dir}")
         console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
-        return
+        if list_designs:
+            return
+        sys.exit(1)
     
     if list_from_steps and not macro:
         console.print("[red]✗[/red] --list-from-steps requires a macro name")
         console.print("[yellow]Example:[/yellow] cf harden user_proj_example --list-from-steps")
-        return
+        sys.exit(1)
 
     gui_mode_count = int(open_in_openroad) + int(open_in_klayout)
     if gui_mode_count > 1:
         console.print("[red]✗[/red] Use only one GUI flag: --open-in-openroad or --open-in-klayout")
-        return
+        sys.exit(1)
     if gui_mode_count and from_step:
         console.print("[red]✗[/red] --from cannot be combined with GUI modes")
         console.print("[yellow]Use --tag to select which run to open, or omit --tag to use latest run[/yellow]")
-        return
+        sys.exit(1)
     if gui_mode_count and list_from_steps:
         console.print("[red]✗[/red] --list-from-steps cannot be combined with GUI modes")
-        return
+        sys.exit(1)
 
     # If no macro specified, show prompt with available macros
     no_macro_specified = not macro and not list_designs and not list_from_steps
@@ -4139,7 +4141,7 @@ def harden(
     if not macro_dir.exists():
         console.print(f"[red]✗[/red] Macro not found: {macro}")
         console.print(f"[yellow]Run 'cf harden --list' to see available macros[/yellow]")
-        return
+        sys.exit(1)
     
     # Find config file
     config_file = None
@@ -4152,7 +4154,7 @@ def harden(
     if not config_file:
         console.print(f"[red]✗[/red] No config file found for {macro}")
         console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
-        return
+        sys.exit(1)
     
     # Check for LibreLane venv
     librelane_venv = openlane_dir / '.venv'
@@ -4194,7 +4196,7 @@ def harden(
             "        continue\n"
             "    seen.add(step_id)\n"
             "    steps.append(step_id)\n"
-            "print(json.dumps({'steps': steps}))\n"
+            f"print({_STEPS_MARKER!r} + json.dumps({{'steps': steps}}))\n"
         )
         result = subprocess.run(
             [str(librelane_python), '-c', script, macro_config],
@@ -4206,8 +4208,7 @@ def harden(
             err = (result.stderr or result.stdout or 'unknown error').strip()
             return None, err
         try:
-            payload = json.loads(result.stdout.strip())
-            return payload.get('steps', []), None
+            return _parse_librelane_steps(result.stdout), None
         except Exception as exc:
             return None, str(exc)
 
@@ -4222,7 +4223,7 @@ def harden(
         console.print("[red]✗[/red] Failed to load LibreLane step list for this macro")
         console.print(f"[yellow]Error:[/yellow] {valid_from_steps_error}")
         console.print("[yellow]Run 'cf setup --only-openlane' to ensure LibreLane is installed correctly[/yellow]")
-        return
+        sys.exit(1)
 
     if list_from_steps:
         console.print(f"[bold cyan]Valid --from steps for {macro}:[/bold cyan]")
@@ -4242,7 +4243,7 @@ def harden(
                 console.print(f"  • {m}")
         else:
             console.print(f"[yellow]Use 'cf harden {macro} --list-from-steps' to see valid step names[/yellow]")
-        return
+        sys.exit(1)
     
     # Fetch versions from upstream
     console.print("[dim]Fetching version information from cf-cli repository...[/dim]")
@@ -4266,7 +4267,7 @@ def harden(
     # Check for conflicting flags
     if force_nix_flag and force_docker_flag:
         console.print("[red]✗[/red] Cannot use both --use-nix and --use-docker")
-        return
+        sys.exit(1)
     
     # Check if Nix is available
     if force_nix_flag or not force_docker_flag:
@@ -4337,7 +4338,7 @@ def harden(
     if not pdk_dir.exists():
         console.print(f"[red]✗[/red] PDK not found: {pdk_dir}")
         console.print("[yellow]Run 'cf setup --only-pdk' to install the PDK[/yellow]")
-        return
+        sys.exit(1)
     
     auto_selected_latest_tag = False
     if (from_step or gui_mode_count) and not tag:
@@ -4348,7 +4349,7 @@ def harden(
                 console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
             else:
                 console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
-            return
+            sys.exit(1)
         candidate_runs = [p for p in runs_dir.iterdir() if p.is_dir()]
         if not candidate_runs:
             console.print("[red]✗[/red] No existing runs found for this macro")
@@ -4356,7 +4357,7 @@ def harden(
                 console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
             else:
                 console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
-            return
+            sys.exit(1)
         latest_run = max(candidate_runs, key=lambda p: p.stat().st_mtime)
         tag = latest_run.name
         auto_selected_latest_tag = True
@@ -4487,13 +4488,13 @@ def harden(
         
         if returncode == 0:
             console.print(f"\n[green]✓[/green] [bold green]Successfully hardened {macro}![/bold green]")
-            console.print(f"[dim]Results saved to: {project_root_path}/runs/{macro}/{tag}/[/dim]")
+            console.print(f"[dim]Run directory: {macro_dir}/runs/{tag}/[/dim]")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
             sys.exit(130)
         else:
             console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {returncode}[/bold red]")
-            console.print(f"[yellow]Check logs in: {project_root_path}/runs/{macro}/{tag}/[/yellow]")
+            console.print(f"[yellow]Check logs in: {macro_dir}/runs/{tag}/[/yellow]")
             sys.exit(returncode)
             
     except KeyboardInterrupt:
@@ -4511,8 +4512,10 @@ def harden(
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             else:
                 process.kill()
+        sys.exit(130)
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error: {e}")
+        sys.exit(1)
 
 @main.group('repo')
 def repo_group():
@@ -4898,11 +4901,11 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     if not (pdk_root / pdk).exists():
         console.print(f"[red]✗[/red] PDK not found at {pdk_root / pdk}")
         console.print("[yellow]Run 'cf setup --only-pdk' to install[/yellow]")
-        return
+        sys.exit(1)
     
     if shutil.which('docker') is None:
         console.print("[red]✗[/red] Docker not found. Docker is required to run precheck.")
-        return
+        sys.exit(1)
     
     pdk_path = pdk_root / pdk
 
@@ -4914,7 +4917,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         if not harness_dir.is_dir():
             console.print(f"[red]✗[/red] {project_type} harness not found at {harness_dir}")
             console.print("[yellow]Run 'cf setup --only-caravel' to install it[/yellow]")
-            return
+            sys.exit(1)
         golden_root = str(harness_dir.resolve())
 
     docker_image = 'chipfoundry/mpw_precheck:latest'
@@ -4988,7 +4991,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         )
         if result.returncode != 0:
             console.print(f"[red]✗[/red] Docker image '{docker_image}' not found. Run 'cf setup --only-precheck' or check your connection.")
-            return
+            sys.exit(1)
         console.print("[yellow]⚠[/yellow] Could not check for image updates (using cached image)")
     
     console.print("[cyan]Running cf-precheck...[/cyan]\n")
@@ -5021,6 +5024,22 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         sys.exit(130)
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error running precheck: {e}")
+        sys.exit(1)
+
+_STEPS_MARKER = 'CF_STEPS_JSON='
+
+
+def _parse_librelane_steps(stdout: str):
+    """Extract the step list printed by the `cf harden` step-list probe."""
+    # LibreLane's console may emit terminal control sequences around the
+    # payload (e.g. a show-cursor escape at exit), so locate it by marker.
+    for line in stdout.splitlines():
+        idx = line.find(_STEPS_MARKER)
+        if idx != -1:
+            payload, _ = json.JSONDecoder().raw_decode(line[idx + len(_STEPS_MARKER):])
+            return payload.get('steps', [])
+    raise ValueError('step list not found in LibreLane output')
+
 
 def _cocotb_run_results(run_dir: Path):
     """Return (passed, failed) test directory names for a caravel_cocotb run."""
@@ -5364,8 +5383,10 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             else:
                 process.kill()
+        sys.exit(130)
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error: {e}")
+        sys.exit(1)
 
 
 DEFAULT_API_URL = 'https://api.chipfoundry.io'

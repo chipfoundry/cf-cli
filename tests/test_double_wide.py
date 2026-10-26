@@ -165,8 +165,36 @@ class TestPrecheck:
         result = CliRunner().invoke(
             main, ["precheck", "--project-root", str(dw_project), "--dry-run"]
         )
+        assert result.exit_code == 1
         assert "harness not found" in result.output
         assert "cf setup --only-caravel" in result.output
+
+    def test_precheck_fails_without_pdk(self, dw_project: Path, monkeypatch):
+        (dw_project / "dependencies" / "pdks" / "sky130A").rmdir()
+        monkeypatch.setattr(cf_main.shutil, "which", lambda name: f"/usr/bin/{name}")
+        result = CliRunner().invoke(
+            main, ["precheck", "--project-root", str(dw_project), "--dry-run"]
+        )
+        assert result.exit_code == 1
+        assert "PDK not found" in result.output
+
+
+class TestHarden:
+    def test_harden_unknown_macro_fails(self, dw_project: Path):
+        (dw_project / "openlane").mkdir()
+        result = CliRunner().invoke(
+            main, ["harden", "no_such_macro", "--project-root", str(dw_project)]
+        )
+        assert result.exit_code == 1
+        assert "Macro not found" in result.output
+
+    def test_harden_missing_config_fails(self, dw_project: Path):
+        (dw_project / "openlane" / "user_proj_counter").mkdir(parents=True)
+        result = CliRunner().invoke(
+            main, ["harden", "user_proj_counter", "--project-root", str(dw_project)]
+        )
+        assert result.exit_code == 1
+        assert "No config file found" in result.output
 
 
 class TestVerify:
