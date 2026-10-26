@@ -42,6 +42,16 @@ HARNESS_REPOS: Dict[str, str] = {
 }
 DEFAULT_HARNESS_REF = "main"
 
+# `double_wide` is hardened as one flat design (no separate macros), and its
+# upstream template ships its own flake.nix pinning LibreLane 3: the native
+# PDN generator reaches the padframe-aligned power pins directly, so no
+# bridging "connection" macro is needed. Every other project type keeps using
+# `openlane_version` (LibreLane/OpenLane 2, fetched from cf-cli's versions.json).
+# Pin the exact commit (not the `3.1.0.dev2` tag) so `nix` resolves it from the
+# local store/cache without an unauthenticated GitHub API call that can 403.
+DOUBLE_WIDE_LIBRELANE_REPO = "github:librelane/librelane"
+DOUBLE_WIDE_LIBRELANE_REV = "f18a07aabb2dd3d6a7e3acc8c3b3621baa784a08"  # 3.1.0.dev2
+
 # Canonical GDS wrapper layouts used by remote precheck and remote push.
 # Each entry is (project_kind, base path without suffix). Suffixes below.
 # Keep in sync with chipignite-backend-services/src/precheck_service and
@@ -58,6 +68,20 @@ GDS_WRAPPER_SUFFIXES: Tuple[str, ...] = (".gds", ".gds.gz")
 def is_padframe_only(project_type: Optional[str]) -> bool:
     """True for project types that have no management SoC or user_defines.v."""
     return project_type in PADFRAME_ONLY_TYPES
+
+
+def read_project_type(project_root: Path, default: str = "digital") -> str:
+    """Read `project.type` from `.cf/project.json`, defaulting if missing/unreadable."""
+    project_json_path = Path(project_root) / ".cf" / "project.json"
+    if project_json_path.is_file():
+        try:
+            data = json.loads(project_json_path.read_text())
+            project_type = data.get("project", {}).get("type")
+            if isinstance(project_type, str) and project_type.strip():
+                return project_type.strip()
+        except (json.JSONDecodeError, IOError):
+            pass
+    return default
 
 
 def harness_ref(project_type: str, versions: Optional[dict] = None) -> str:

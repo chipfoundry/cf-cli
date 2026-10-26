@@ -236,6 +236,92 @@ class TestHarden:
         assert result.exit_code == 1
         assert "No config file found" in result.output
 
+    def _make_double_wide_macro(self, root: Path, macro: str = WRAPPER) -> Path:
+        macro_dir = root / "openlane" / macro
+        macro_dir.mkdir(parents=True, exist_ok=True)
+        (macro_dir / "config.json").write_text("{}")
+        (root / "flake.nix").write_text("{ }\n")
+        return macro_dir
+
+    def test_harden_double_wide_dispatches_to_librelane3(self, dw_project: Path, monkeypatch):
+        self._make_double_wide_macro(dw_project)
+        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: dw_project)
+        monkeypatch.setattr(cf_main.librelane_run, "double_wide_nix_available", lambda flake_dir: True)
+        monkeypatch.setattr(
+            cf_main.librelane_run,
+            "get_double_wide_valid_from_steps",
+            lambda **kwargs: (["Yosys.Synthesis", "OpenROAD.Floorplan"], None),
+        )
+        monkeypatch.setattr(
+            cf_main.librelane_run,
+            "build_double_wide_librelane_command",
+            lambda **kwargs: (["nix", "develop", str(dw_project), "--command", "librelane"], {}),
+        )
+        result = CliRunner().invoke(
+            main, ["harden", WRAPPER, "--project-root", str(dw_project), "--dry-run"]
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output.replace("\n", " ")
+        assert "LibreLane 3, native PDN-to-pad routing" in out
+        assert "nix develop" in out
+
+    def test_harden_double_wide_list_from_steps(self, dw_project: Path, monkeypatch):
+        self._make_double_wide_macro(dw_project)
+        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: dw_project)
+        monkeypatch.setattr(cf_main.librelane_run, "double_wide_nix_available", lambda flake_dir: True)
+        monkeypatch.setattr(
+            cf_main.librelane_run,
+            "get_double_wide_valid_from_steps",
+            lambda **kwargs: (["Yosys.Synthesis", "OpenROAD.Floorplan"], None),
+        )
+        result = CliRunner().invoke(
+            main, ["harden", WRAPPER, "--project-root", str(dw_project), "--list-from-steps"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Yosys.Synthesis" in result.output
+        assert "OpenROAD.Floorplan" in result.output
+
+    def test_harden_double_wide_rejects_use_docker(self, dw_project: Path):
+        self._make_double_wide_macro(dw_project)
+        result = CliRunner().invoke(
+            main, ["harden", WRAPPER, "--project-root", str(dw_project), "--use-docker"]
+        )
+        assert result.exit_code != 0
+        assert "does not support --use-docker" in result.output
+
+    def test_harden_double_wide_requires_flake(self, dw_project: Path, monkeypatch):
+        self._make_double_wide_macro(dw_project)
+        (dw_project / "flake.nix").unlink()
+        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: None)
+        result = CliRunner().invoke(
+            main, ["harden", WRAPPER, "--project-root", str(dw_project)]
+        )
+        assert result.exit_code != 0
+        assert "No flake.nix found" in result.output
+
+    def test_harden_double_wide_requires_nix(self, dw_project: Path, monkeypatch):
+        self._make_double_wide_macro(dw_project)
+        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: dw_project)
+        monkeypatch.setattr(cf_main.librelane_run, "double_wide_nix_available", lambda flake_dir: False)
+        result = CliRunner().invoke(
+            main, ["harden", WRAPPER, "--project-root", str(dw_project)]
+        )
+        assert result.exit_code != 0
+        assert "Nix not available" in result.output
+
+    def test_harden_other_project_types_unaffected(self, tmp_path: Path):
+        """Non-double_wide project types must keep using the OpenLane 2 venv path."""
+        _write_project_json(tmp_path, project_type="digital")
+        macro_dir = tmp_path / "openlane" / "user_proj_example"
+        macro_dir.mkdir(parents=True)
+        (macro_dir / "config.json").write_text("{}")
+        result = CliRunner().invoke(
+            main, ["harden", "user_proj_example", "--project-root", str(tmp_path)]
+        )
+        assert result.exit_code != 0
+        assert "LibreLane not installed" in result.output
+        assert "LibreLane 3" not in result.output
+
 
 class TestVerify:
     def test_verify_runs_in_openframe_mode(self, dw_project: Path):
