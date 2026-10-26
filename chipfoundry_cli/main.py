@@ -5022,6 +5022,19 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error running precheck: {e}")
 
+def _cocotb_run_results(run_dir: Path):
+    """Return (passed, failed) test directory names for a caravel_cocotb run."""
+    passed, failed = [], []
+    if not run_dir.is_dir():
+        return passed, failed
+    for test_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
+        if (test_dir / 'failed').exists():
+            failed.append(test_dir.name)
+        elif (test_dir / 'passed').exists():
+            passed.append(test_dir.name)
+    return passed, failed
+
+
 @main.command('verify')
 @click.argument('test', required=False)
 @click.option('--project-root', type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory)')
@@ -5295,6 +5308,10 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
     
     # Add CI flag to disable Docker interactive mode (required when not running in a terminal)
     cmd.append('--CI')
+
+    from datetime import datetime
+    run_tag = f"cf_verify_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    cmd.extend(['-tag', run_tag])
     
     # Run cocotb tests
     console.print(f"[cyan]Running cocotb verification...[/cyan]")
@@ -5310,9 +5327,20 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
         
         # Wait for process to complete
         returncode = process.wait()
-        
+
         if returncode == 0:
-            console.print(f"\n[green]✓[/green] Verification passed!")
+            # caravel_cocotb exits 0 even when tests fail; it records the
+            # outcome as a 'passed' / 'failed' marker file in each test dir.
+            passed, failed = _cocotb_run_results(cocotb_dir / 'sim' / run_tag)
+            if failed or not passed:
+                console.print(
+                    f"\n[red]✗[/red] Verification failed: {len(failed)} failed, {len(passed)} passed"
+                )
+                for name in failed:
+                    console.print(f"  [red]•[/red] {name}")
+                console.print(f"[yellow]Check logs in: {cocotb_dir / 'sim' / run_tag}[/yellow]")
+                sys.exit(1)
+            console.print(f"\n[green]✓[/green] Verification passed! ({len(passed)} test(s))")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
             sys.exit(130)
