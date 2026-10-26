@@ -18,6 +18,7 @@ from chipfoundry_cli.utils import (
     get_gpio_config_from_project_json, save_gpio_config_to_project_json,
     GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE,
     detect_github_repo_url, get_head_commit_sha,
+    PROJECT_TYPES, HARNESS_REPOS, is_padframe_only, harness_ref,
 )
 import os
 from pathlib import Path
@@ -568,10 +569,15 @@ def init(project_root, shuttle, description):
 
     name = _prompt_with_default("Project name", current_name, default_name) or default_name
     project_type = _prompt_with_default(
-        "Project type (digital/analog/openframe)", current_type, detected_type
+        f"Project type ({'/'.join(PROJECT_TYPES)})", current_type, detected_type
     )
     if not project_type:
         console.print("[red]Project type is required.[/red]")
+        raise click.Abort()
+    if project_type not in PROJECT_TYPES:
+        console.print(
+            f"[red]Unknown project type '{project_type}'. Expected one of: {', '.join(PROJECT_TYPES)}.[/red]"
+        )
         raise click.Abort()
 
     if description is not None:
@@ -780,10 +786,11 @@ def gpio_config(project_root, view):
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
     
-    # For openframe, GPIO config is not needed
-    if project_type == 'openframe':
-        console.print("[red]GPIO configuration is not available for openframe projects.[/red]")
-        console.print("[yellow]Openframe projects do not use user_defines.v.[/yellow]")
+    if is_padframe_only(project_type):
+        console.print(f"[red]GPIO configuration is not available for {project_type} projects.[/red]")
+        console.print(
+            f"[yellow]{project_type} projects do not use user_defines.v; the user wrapper drives the pad controls.[/yellow]"
+        )
         raise click.Abort()
     
     user_defines_path = project_root / 'verilog' / 'rtl' / 'user_defines.v'
@@ -1772,8 +1779,8 @@ def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, s
     """Return [(rel_path, abs_path, size, kind)] for files the platform
     accepts via --https.
 
-    Picks exactly one wrapper GDS (analog/digital/openframe) and, for
-    non-openframe projects, ``verilog/rtl/user_defines.v`` if it exists.
+    Picks exactly one wrapper GDS (analog/digital/openframe/double_wide) and,
+    for caravel-based projects, ``verilog/rtl/user_defines.v`` if it exists.
     Raises FileNotFoundError if no wrapper is present or
     ValueError if multiple are.
     """
@@ -1790,7 +1797,8 @@ def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, s
         raise FileNotFoundError(
             "No wrapper GDS found (expected one of gds/user_project_wrapper.gds[.gz], "
             "gds/user_analog_project_wrapper.gds[.gz], "
-            "gds/openframe_project_wrapper.gds[.gz])."
+            "gds/openframe_project_wrapper.gds[.gz], "
+            "gds/double_wide_openframe_project_wrapper.gds[.gz])."
         )
     if len(hits) > 1:
         paths = ", ".join(h[1] for h in hits)
@@ -1804,7 +1812,7 @@ def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, s
         (wrapper_rel, abs_wrapper, abs_wrapper.stat().st_size, "wrapper")
     ]
 
-    if kind != "openframe":
+    if not is_padframe_only(kind):
         ud = project_root / USER_DEFINES_REL
         if ud.is_file():
             results.append((USER_DEFINES_REL, ud, ud.stat().st_size, "aux"))
@@ -2169,7 +2177,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
     upload_map = {
         ".cf/project.json": project_json_path,
     }
-    if detected_type != "openframe":
+    if not is_padframe_only(detected_type):
         upload_map["verilog/rtl/user_defines.v"] = collected.get("verilog/rtl/user_defines.v")
 
     # Add the appropriate GDS file based on what was collected
@@ -3156,8 +3164,9 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         except (json.JSONDecodeError, IOError):
             pass  # Use default if we can't read it
     
-    is_openframe = project_type == 'openframe'
-    
+    padframe_only = is_padframe_only(project_type)
+    harness_repo = HARNESS_REPOS.get(project_type)
+
     had_errors = False
 
     def _error_text(err):
@@ -3186,8 +3195,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     # If in "only" mode, only install what's specified
     # If not in "only" mode, install everything
     install_caravel = only_caravel or not only_mode
-    # MCW is not used for openframe projects
-    install_mcw = (only_mcw or not only_mode) and not is_openframe
+    # MCW is not used by bare-padframe projects
+    install_mcw = (only_mcw or not only_mode) and not padframe_only
     install_openlane = only_openlane or not only_mode
     install_pdk = only_pdk or not only_mode
     install_timing = only_timing or not only_mode
@@ -3201,11 +3210,14 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         f"Repository: [yellow]{repo_owner}/{repo_name}@{branch}[/yellow]",
         f"PDK: [yellow]{pdk}[/yellow]",
         f"Project type: [yellow]{project_type}[/yellow]",
-        f"Caravel variant: [yellow]{'caravel-lite' if caravel_lite else 'caravel'}[/yellow]",
     ]
-    
-    if is_openframe:
-        config_lines.append("[dim]MCW not needed for openframe projects[/dim]")
+    if harness_repo:
+        config_lines.append(f"Harness: [yellow]{harness_repo}[/yellow]")
+    else:
+        config_lines.append(f"Caravel variant: [yellow]{'caravel-lite' if caravel_lite else 'caravel'}[/yellow]")
+
+    if padframe_only:
+        config_lines.append(f"[dim]MCW not needed for {project_type} projects[/dim]")
     
     if only_mode:
         installing = []
@@ -3254,21 +3266,26 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             deps_dir.mkdir(exist_ok=True)
             console.print(f"[green]✓[/green] Dependencies directory ready at {deps_dir}")
     
-    # Step 2: Install Caravel/Caravel-Lite
+    # Step 2: Install Caravel/Caravel-Lite, or the project type's own harness
     if install_caravel:
-        console.print("\n[bold]Step 2:[/bold] Installing Caravel...")
         caravel_dir = project_root_path / 'caravel'
-        caravel_name = 'caravel-lite' if caravel_lite else 'caravel'
-        
-        # Determine MPW tag based on PDK
-        if pdk not in mpw_tags:
-            console.print(f"[red]✗[/red] PDK '{pdk}' not found in version configuration")
-            console.print(f"[yellow]Available PDKs: {', '.join(mpw_tags.keys())}[/yellow]")
-            raise click.Abort()
-        mpw_tag = mpw_tags[pdk]
-        
-        # Caravel repository URL
-        caravel_repo = f'https://github.com/chipfoundry/{caravel_name}'
+        if harness_repo:
+            console.print("\n[bold]Step 2:[/bold] Installing harness...")
+            caravel_name = harness_repo.rstrip('/').rsplit('/', 1)[-1]
+            caravel_repo = harness_repo
+            mpw_tag = harness_ref(project_type, versions)
+        else:
+            console.print("\n[bold]Step 2:[/bold] Installing Caravel...")
+            caravel_name = 'caravel-lite' if caravel_lite else 'caravel'
+
+            # Determine MPW tag based on PDK
+            if pdk not in mpw_tags:
+                console.print(f"[red]✗[/red] PDK '{pdk}' not found in version configuration")
+                console.print(f"[yellow]Available PDKs: {', '.join(mpw_tags.keys())}[/yellow]")
+                raise click.Abort()
+            mpw_tag = mpw_tags[pdk]
+
+            caravel_repo = f'https://github.com/chipfoundry/{caravel_name}'
         
         # Check if already installed with correct version
         is_correct_version, current_version = check_version_installed(caravel_dir, mpw_tag)
@@ -3305,10 +3322,9 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     console.print(f"[dim]{e.stderr}[/dim]")
     
     # Step 3: Install Management Core Wrapper
-    # Show message if user explicitly requested MCW but project is openframe
-    if only_mcw and is_openframe:
+    if only_mcw and padframe_only:
         console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
-        console.print("[yellow]⚠[/yellow] MCW is not used for openframe projects, skipping...")
+        console.print(f"[yellow]⚠[/yellow] MCW is not used for {project_type} projects, skipping...")
     elif install_mcw:
         console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
         mcw_dir = project_root_path / 'mgmt_core_wrapper'
@@ -4860,7 +4876,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
     
-    if project_type != 'openframe':
+    if not is_padframe_only(project_type):
         gpio_config = get_gpio_config_from_project_json(str(project_json_path))
         if not gpio_config or len(gpio_config) == 0:
             console.print("[red]✗[/red] GPIO configuration not found in project.json")
@@ -4889,13 +4905,24 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         return
     
     pdk_path = pdk_root / pdk
-    
+
+    # The precheck image ships caravel at /opt/caravel. Other harnesses are
+    # installed by `cf setup` into <project>/caravel, which is mounted below.
+    golden_root = '/opt/caravel'
+    if project_type in HARNESS_REPOS:
+        harness_dir = project_root_path / 'caravel'
+        if not harness_dir.is_dir():
+            console.print(f"[red]✗[/red] {project_type} harness not found at {harness_dir}")
+            console.print("[yellow]Run 'cf setup --only-caravel' to install it[/yellow]")
+            return
+        golden_root = str(harness_dir.resolve())
+
     docker_image = 'chipfoundry/mpw_precheck:latest'
     
     precheck_args = [
         '-i', str(project_root_path),
         '-p', str(pdk_path),
-        '-c', '/opt/caravel',
+        '-c', golden_root,
     ]
     
     if magic_drc:
@@ -4916,6 +4943,10 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         '--platform', 'linux/amd64',
         '-v', f'{project_root_path}:{project_root_path}',
         '-v', f'{pdk_root}:{pdk_root}',
+    ]
+    if golden_root != '/opt/caravel' and not golden_root.startswith(f'{project_root_path}/'):
+        docker_cmd += ['-v', f'{golden_root}:{golden_root}']
+    docker_cmd += [
         '-e', f'PDK_ROOT={pdk_root}',
         '-e', f'PDK_PATH={pdk_path}',
         '-e', f'PDKPATH={pdk_path}',
@@ -5090,14 +5121,16 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
     
     project_json_path = project_root_path / '.cf' / 'project.json'
     
-    # Get project type (needed for openframe flag)
     with open(project_json_path, 'r') as f:
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
-    
-    # Check if GPIO configuration exists (skip check if just listing tests or openframe)
+    # Bare-padframe projects run caravel_cocotb in OpenFrame mode against the
+    # harness in <project>/caravel (its toplevel_cocotb.v sets the pad count).
+    padframe_only = is_padframe_only(project_type)
+
+    # Check if GPIO configuration exists (skip check if just listing tests or padframe-only)
     if not list_tests:
-        if project_type != 'openframe':
+        if not padframe_only:
             gpio_config = get_gpio_config_from_project_json(str(project_json_path))
             if not gpio_config or len(gpio_config) == 0:
                 console.print("[red]✗[/red] GPIO configuration not found in project.json")
@@ -5197,7 +5230,7 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
     
     if dry_run:
         console.print("[bold yellow]Dry run - configuration ready[/bold yellow]\n")
-        openframe_flag = " --openframe" if project_type == 'openframe' else ""
+        openframe_flag = " --openframe" if padframe_only else ""
         if test:
             console.print(f"Would run: {caravel_cocotb_bin} -t {test} -sim {sim_arg}{openframe_flag}")
         elif run_all:
@@ -5257,8 +5290,7 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
     if sim.lower() == 'gl':
         cmd.extend(['-sim', 'GL'])
     
-    # Add openframe flag for openframe projects
-    if project_type == 'openframe':
+    if padframe_only:
         cmd.append('--openframe')
     
     # Add CI flag to disable Docker interactive mode (required when not running in a terminal)

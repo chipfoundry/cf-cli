@@ -112,6 +112,24 @@ If you already have a project directory with GDS files:
 
 ---
 
+## Double-wide openframe projects
+
+Double-wide projects (`type: double_wide`, detected from
+`gds/double_wide_openframe_project_wrapper.gds`) use the same commands as
+openframe projects, with these differences:
+
+- `cf setup` clones the double-wide harness
+  ([chipfoundry/double_wide_openframe](https://github.com/chipfoundry/double_wide_openframe))
+  into `caravel/` instead of caravel-lite, and skips the management core wrapper.
+  The harness ref comes from `harness_refs.double_wide` in `versions.json` (default `main`).
+- `cf precheck` passes `caravel/` to cf-precheck as the golden root, since the
+  precheck image only ships the standard caravel.
+- `cf verify` runs caravel-cocotb in OpenFrame mode. The harness supplies the
+  63-pad testbench (`verilog/rtl/toplevel_cocotb.v`) and include lists.
+- `cf gpio-config` is not used: the user wrapper drives every pad control signal.
+
+---
+
 ## Project Structure Requirements
 
 Your project directory **must** contain:
@@ -120,6 +138,7 @@ Your project directory **must** contain:
   - `user_project_wrapper.gds` (for digital projects)
   - `user_analog_project_wrapper.gds` (for analog projects)
   - `openframe_project_wrapper.gds` (for openframe projects)
+  - `double_wide_openframe_project_wrapper.gds` (for double-wide openframe projects)
   - **Note**: Both compressed (`.gz`) and uncompressed (`.gds`) files are supported
 - `verilog/rtl/user_defines.v` (required for digital/analog)
 - `.cf/project.json` (optional; will be created/updated automatically)
@@ -617,7 +636,7 @@ Preconditions:
 - Project has a GitHub repo URL (set via `cf init`, shown in the portal).
 - The ChipFoundry GitHub App is installed on that repo (prompted in the portal).
 - Your local `HEAD` has been pushed to `origin` on some branch (`git push`).
-- Push-critical files at `HEAD` are clean: wrapper GDS, `verilog/rtl/user_defines.v` (when not an openframe project), and `.cf/project.json` (when tracked).
+- Push-critical files at `HEAD` are clean: wrapper GDS, `verilog/rtl/user_defines.v` (digital and analog projects only), and `.cf/project.json` (when tracked).
 
 What happens:
 1. `cf push --remote` resolves your local HEAD SHA and checks it is reachable from a remote ref.
@@ -641,8 +660,8 @@ both port 22 and GitHub.
 Preconditions:
 - Project is linked to the platform (`cf init` or `cf link`) and you are logged in.
 - Wrapper GDS exists locally under `gds/` (one of `user_project_wrapper.gds[.gz]`,
-  `user_analog_project_wrapper.gds[.gz]`, `openframe_project_wrapper.gds[.gz]`).
-- For non-openframe projects, `verilog/rtl/user_defines.v` is also uploaded when present.
+  `user_analog_project_wrapper.gds[.gz]`, `openframe_project_wrapper.gds[.gz]`, `double_wide_openframe_project_wrapper.gds[.gz]`).
+- For digital and analog projects, `verilog/rtl/user_defines.v` is also uploaded when present.
 - Outbound HTTPS to `*.s3.us-east-2.amazonaws.com` is allowed.
 
 What happens:
@@ -863,7 +882,7 @@ The CLI tracks your project submission state through the `submission_state` fiel
 
 1. **File Collection:**
    - Checks for required GDS and Verilog files
-   - Auto-detects project type (digital, analog, openframe) based on GDS file name
+   - Auto-detects project type (digital, analog, openframe, double_wide) based on GDS file name
    - **Supports both compressed and uncompressed GDS files**
 
 2. **Configuration:**
@@ -932,7 +951,7 @@ cf config
 # Initialize project (in your project directory)
 cf init
 # Project name (detected: my_awesome_project): 
-# Project type (digital/analog/openframe) (detected: digital): 
+# Project type (digital/analog/openframe/double_wide) (detected: digital): 
 
 # Upload your project
 cf push

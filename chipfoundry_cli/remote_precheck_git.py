@@ -22,8 +22,10 @@ _GDS_BASES: Tuple[Tuple[str, str], ...] = (
     ("analog", "gds/user_analog_project_wrapper"),
     ("digital", "gds/user_project_wrapper"),
     ("openframe", "gds/openframe_project_wrapper"),
+    ("double_wide", "gds/double_wide_openframe_project_wrapper"),
     ("mini", "gds/user_project_wrapper_mini4"),
 )
+_PADFRAME_ONLY_KINDS = frozenset({"openframe", "double_wide"})
 _GDS_SUFFIXES: Tuple[str, ...] = (".gds", ".gds.gz")
 
 USER_DEFINES_REL = "verilog/rtl/user_defines.v"
@@ -301,7 +303,8 @@ def _push_critical_paths(repo: Path, project_json: Path) -> Set[str]:
             f"{e} "
             "Check that the wrapper GDS is committed and located under the "
             "expected path (e.g. gds/user_project_wrapper.gds, "
-            "gds/openframe_project_wrapper.gds, etc.). If you use Git LFS, "
+            "gds/openframe_project_wrapper.gds, "
+            "gds/double_wide_openframe_project_wrapper.gds, etc.). If you use Git LFS, "
             "run `git lfs pull` so the actual file (not the pointer) is present."
         ) from e
     out: Set[str] = {gds_rel}
@@ -313,8 +316,8 @@ def _push_critical_paths(repo: Path, project_json: Path) -> Set[str]:
             "Fix project type or GDS layout before remote push."
         )
 
-    # user_defines.v is required except for openframe, matching collect_project_files().
-    if kind_gds != "openframe":
+    # user_defines.v is required except for bare-padframe projects, matching collect_project_files().
+    if kind_gds not in _PADFRAME_ONLY_KINDS:
         ud = repo / USER_DEFINES_REL
         if ud.is_file() or _path_tracked_in_git(repo, USER_DEFINES_REL):
             out.add(USER_DEFINES_REL)
