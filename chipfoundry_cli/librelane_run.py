@@ -228,6 +228,146 @@ def new_run_tag() -> str:
     return datetime.now().strftime("%y_%m_%d_%H_%M")
 
 
+def double_wide_flake_dir(project_root: Path) -> Optional[Path]:
+    """The double_wide project's own flake.nix dir, pinning LibreLane 3.
+
+    double_wide ships its own flake (not cf-cli's `chipfoundry/openlane-2`
+    flake used by every other project type) because the flat wrapper needs
+    LibreLane 3's native PDN-to-pad routing. Returns None if the project
+    doesn't have one (e.g. it predates this, or a user deleted it).
+    """
+    if (project_root / "flake.nix").is_file():
+        return project_root
+    return None
+
+
+def double_wide_nix_available(flake_dir: Path, timeout: float = 20) -> bool:
+    """Check that `nix develop` can resolve the project's pinned LibreLane 3 flake."""
+    if shutil.which("nix") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["nix", "flake", "metadata", str(flake_dir), "--json"],
+            capture_output=True,
+            timeout=timeout,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def build_double_wide_librelane_command(
+    *,
+    project_root: Path,
+    flake_dir: Path,
+    config_file: Path,
+    pdk_root: Path,
+    pdk: str,
+    tag: str,
+    from_step: Optional[str] = None,
+    open_in_openroad: bool = False,
+    open_in_klayout: bool = False,
+) -> Tuple[List[str], Dict[str, str]]:
+    """Build the `nix develop` command that runs LibreLane 3 on a flat double_wide wrapper.
+
+    No `--manual-pdk`/`--pdk-root`/`--pdk` flags: LibreLane 3's default
+    (Ciel-managed) PDK resolution auto-fetches the pinned PDK commit into
+    `PDK_ROOT` on its own, the same project-local `dependencies/pdks` root
+    every other project type's PDK already lives under (Ciel keys PDK
+    versions by commit, so the two coexist without conflict).
+    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "PROJECT_ROOT": str(project_root),
+            "PDK_ROOT": str(pdk_root),
+            "PDK": pdk,
+            "LIBRELANE_RUN_TAG": tag,
+        }
+    )
+
+    librelane_args = []
+    if open_in_openroad:
+        librelane_args.extend(["--flow", "OpenInOpenROAD"])
+    elif open_in_klayout:
+        librelane_args.extend(["--flow", "OpenInKLayout"])
+    librelane_args.extend(["--ef-save-views-to", str(project_root), "--run-tag", tag])
+    if not from_step and not (open_in_openroad or open_in_klayout):
+        librelane_args.append("--overwrite")
+    if from_step:
+        librelane_args.extend(["--from", from_step])
+    librelane_args.append(str(config_file))
+
+    cmd = ["nix", "develop", str(flake_dir), "--command", "librelane", *librelane_args]
+    return cmd, env
+
+
+def get_double_wide_valid_from_steps(
+    *, flake_dir: Path, config_file: Path, working_dir: Path
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Resolve valid `--from` step names for a double_wide config via LibreLane 3."""
+    script = (
+        "import json, sys\n"
+        "from librelane.config import Config\n"
+        "from librelane.flows import Flow, SequentialFlow\n"
+        "cfg = sys.argv[1]\n"
+        "target = Flow.factory.get('Classic')\n"
+        "meta = Config.get_meta(cfg)\n"
+        "if meta:\n"
+        "    if isinstance(meta.flow, str):\n"
+        "        found = Flow.factory.get(meta.flow)\n"
+        "        if found is None:\n"
+        "            raise RuntimeError(f\"Unknown flow '{meta.flow}' in config metadata\")\n"
+        "        target = found\n"
+        "    elif isinstance(meta.flow, list):\n"
+        "        target = SequentialFlow.make(meta.flow)\n"
+        "    if meta.substituting_steps is not None:\n"
+        "        if meta.flow is None:\n"
+        "            raise RuntimeError('substituting_steps is set but flow is not defined')\n"
+        "        if not issubclass(target, SequentialFlow):\n"
+        "            raise RuntimeError('substituting_steps requires a sequential flow')\n"
+        "        target = target.Substitute(meta.substituting_steps)\n"
+        "steps = []\n"
+        "seen = set()\n"
+        "for step in getattr(target, 'Steps', []) or []:\n"
+        "    step_id = getattr(step, 'id', None)\n"
+        "    if not step_id or step_id in seen:\n"
+        "        continue\n"
+        "    seen.add(step_id)\n"
+        "    steps.append(step_id)\n"
+        "print('__CF_STEPS__' + json.dumps({'steps': steps}))\n"
+    )
+    try:
+        result = subprocess.run(
+            [
+                "nix",
+                "develop",
+                str(flake_dir),
+                "--command",
+                "python3",
+                "-c",
+                script,
+                str(config_file),
+            ],
+            cwd=str(working_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, str(exc)
+    if result.returncode != 0:
+        return None, (result.stderr or result.stdout or "unknown error").strip()
+    marker = "__CF_STEPS__"
+    for line in result.stdout.splitlines():
+        if line.startswith(marker):
+            try:
+                return json.loads(line[len(marker):])["steps"], None
+            except Exception as exc:
+                return None, str(exc)
+    return None, "LibreLane did not report a step list"
+
+
 def find_synth_stat_json(flow_root: Path, macro: str, run_tag: str) -> Optional[Path]:
     """Locate Yosys stat.json written by a synth-only or full LibreLane run."""
     run_dir = flow_root / macro / "runs" / run_tag

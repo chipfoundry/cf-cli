@@ -18,7 +18,10 @@ from chipfoundry_cli.utils import (
     get_gpio_config_from_project_json, save_gpio_config_to_project_json,
     GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE,
     detect_github_repo_url, get_head_commit_sha,
+    PROJECT_TYPES, HARNESS_REPOS, is_padframe_only, harness_ref,
+    read_project_type, DOUBLE_WIDE_LIBRELANE_REV,
 )
+from chipfoundry_cli import librelane_run
 import os
 from pathlib import Path
 from rich.console import Console
@@ -33,6 +36,7 @@ import sys
 import shutil
 import signal
 import difflib
+import shlex
 
 # Textual imports for GPIO grid UI
 from textual.app import App, ComposeResult
@@ -568,10 +572,15 @@ def init(project_root, shuttle, description):
 
     name = _prompt_with_default("Project name", current_name, default_name) or default_name
     project_type = _prompt_with_default(
-        "Project type (digital/analog/openframe)", current_type, detected_type
+        f"Project type ({'/'.join(PROJECT_TYPES)})", current_type, detected_type
     )
     if not project_type:
         console.print("[red]Project type is required.[/red]")
+        raise click.Abort()
+    if project_type not in PROJECT_TYPES:
+        console.print(
+            f"[red]Unknown project type '{project_type}'. Expected one of: {', '.join(PROJECT_TYPES)}.[/red]"
+        )
         raise click.Abort()
 
     if description is not None:
@@ -780,10 +789,11 @@ def gpio_config(project_root, view):
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
     
-    # For openframe, GPIO config is not needed
-    if project_type == 'openframe':
-        console.print("[red]GPIO configuration is not available for openframe projects.[/red]")
-        console.print("[yellow]Openframe projects do not use user_defines.v.[/yellow]")
+    if is_padframe_only(project_type):
+        console.print(f"[red]GPIO configuration is not available for {project_type} projects.[/red]")
+        console.print(
+            f"[yellow]{project_type} projects do not use user_defines.v; the user wrapper drives the pad controls.[/yellow]"
+        )
         raise click.Abort()
     
     user_defines_path = project_root / 'verilog' / 'rtl' / 'user_defines.v'
@@ -1772,8 +1782,8 @@ def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, s
     """Return [(rel_path, abs_path, size, kind)] for files the platform
     accepts via --https.
 
-    Picks exactly one wrapper GDS (analog/digital/openframe) and, for
-    non-openframe projects, ``verilog/rtl/user_defines.v`` if it exists.
+    Picks exactly one wrapper GDS (analog/digital/openframe/double_wide) and,
+    for caravel-based projects, ``verilog/rtl/user_defines.v`` if it exists.
     Raises FileNotFoundError if no wrapper is present or
     ValueError if multiple are.
     """
@@ -1790,7 +1800,8 @@ def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, s
         raise FileNotFoundError(
             "No wrapper GDS found (expected one of gds/user_project_wrapper.gds[.gz], "
             "gds/user_analog_project_wrapper.gds[.gz], "
-            "gds/openframe_project_wrapper.gds[.gz])."
+            "gds/openframe_project_wrapper.gds[.gz], "
+            "gds/double_wide_openframe_project_wrapper.gds[.gz])."
         )
     if len(hits) > 1:
         paths = ", ".join(h[1] for h in hits)
@@ -1804,7 +1815,7 @@ def _collect_push_candidates(project_root: Path) -> List[Tuple[str, Path, int, s
         (wrapper_rel, abs_wrapper, abs_wrapper.stat().st_size, "wrapper")
     ]
 
-    if kind != "openframe":
+    if not is_padframe_only(kind):
         ud = project_root / USER_DEFINES_REL
         if ud.is_file():
             results.append((USER_DEFINES_REL, ud, ud.stat().st_size, "aux"))
@@ -2169,7 +2180,7 @@ def push(project_root, sftp_host, sftp_username, sftp_key, project_id, project_n
     upload_map = {
         ".cf/project.json": project_json_path,
     }
-    if detected_type != "openframe":
+    if not is_padframe_only(detected_type):
         upload_map["verilog/rtl/user_defines.v"] = collected.get("verilog/rtl/user_defines.v")
 
     # Add the appropriate GDS file based on what was collected
@@ -3156,8 +3167,9 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         except (json.JSONDecodeError, IOError):
             pass  # Use default if we can't read it
     
-    is_openframe = project_type == 'openframe'
-    
+    padframe_only = is_padframe_only(project_type)
+    harness_repo = HARNESS_REPOS.get(project_type)
+
     had_errors = False
 
     def _error_text(err):
@@ -3186,8 +3198,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     # If in "only" mode, only install what's specified
     # If not in "only" mode, install everything
     install_caravel = only_caravel or not only_mode
-    # MCW is not used for openframe projects
-    install_mcw = (only_mcw or not only_mode) and not is_openframe
+    # MCW is not used by bare-padframe projects
+    install_mcw = (only_mcw or not only_mode) and not padframe_only
     install_openlane = only_openlane or not only_mode
     install_pdk = only_pdk or not only_mode
     install_timing = only_timing or not only_mode
@@ -3201,11 +3213,14 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
         f"Repository: [yellow]{repo_owner}/{repo_name}@{branch}[/yellow]",
         f"PDK: [yellow]{pdk}[/yellow]",
         f"Project type: [yellow]{project_type}[/yellow]",
-        f"Caravel variant: [yellow]{'caravel-lite' if caravel_lite else 'caravel'}[/yellow]",
     ]
-    
-    if is_openframe:
-        config_lines.append("[dim]MCW not needed for openframe projects[/dim]")
+    if harness_repo:
+        config_lines.append(f"Harness: [yellow]{harness_repo}[/yellow]")
+    else:
+        config_lines.append(f"Caravel variant: [yellow]{'caravel-lite' if caravel_lite else 'caravel'}[/yellow]")
+
+    if padframe_only:
+        config_lines.append(f"[dim]MCW not needed for {project_type} projects[/dim]")
     
     if only_mode:
         installing = []
@@ -3254,21 +3269,26 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             deps_dir.mkdir(exist_ok=True)
             console.print(f"[green]✓[/green] Dependencies directory ready at {deps_dir}")
     
-    # Step 2: Install Caravel/Caravel-Lite
+    # Step 2: Install Caravel/Caravel-Lite, or the project type's own harness
     if install_caravel:
-        console.print("\n[bold]Step 2:[/bold] Installing Caravel...")
         caravel_dir = project_root_path / 'caravel'
-        caravel_name = 'caravel-lite' if caravel_lite else 'caravel'
-        
-        # Determine MPW tag based on PDK
-        if pdk not in mpw_tags:
-            console.print(f"[red]✗[/red] PDK '{pdk}' not found in version configuration")
-            console.print(f"[yellow]Available PDKs: {', '.join(mpw_tags.keys())}[/yellow]")
-            raise click.Abort()
-        mpw_tag = mpw_tags[pdk]
-        
-        # Caravel repository URL
-        caravel_repo = f'https://github.com/chipfoundry/{caravel_name}'
+        if harness_repo:
+            console.print("\n[bold]Step 2:[/bold] Installing harness...")
+            caravel_name = harness_repo.rstrip('/').rsplit('/', 1)[-1]
+            caravel_repo = harness_repo
+            mpw_tag = harness_ref(project_type, versions)
+        else:
+            console.print("\n[bold]Step 2:[/bold] Installing Caravel...")
+            caravel_name = 'caravel-lite' if caravel_lite else 'caravel'
+
+            # Determine MPW tag based on PDK
+            if pdk not in mpw_tags:
+                console.print(f"[red]✗[/red] PDK '{pdk}' not found in version configuration")
+                console.print(f"[yellow]Available PDKs: {', '.join(mpw_tags.keys())}[/yellow]")
+                raise click.Abort()
+            mpw_tag = mpw_tags[pdk]
+
+            caravel_repo = f'https://github.com/chipfoundry/{caravel_name}'
         
         # Check if already installed with correct version
         is_correct_version, current_version = check_version_installed(caravel_dir, mpw_tag)
@@ -3305,10 +3325,9 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     console.print(f"[dim]{e.stderr}[/dim]")
     
     # Step 3: Install Management Core Wrapper
-    # Show message if user explicitly requested MCW but project is openframe
-    if only_mcw and is_openframe:
+    if only_mcw and padframe_only:
         console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
-        console.print("[yellow]⚠[/yellow] MCW is not used for openframe projects, skipping...")
+        console.print(f"[yellow]⚠[/yellow] MCW is not used for {project_type} projects, skipping...")
     elif install_mcw:
         console.print("\n[bold]Step 3:[/bold] Installing Management Core Wrapper...")
         mcw_dir = project_root_path / 'mgmt_core_wrapper'
@@ -3738,6 +3757,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             console.print("[bold green]Installation complete![/bold green]")
         else:
             console.print("[bold green]Setup complete![/bold green]")
+        if had_errors:
+            sys.exit(1)
 
 
 def _is_nix_toolchain_noise_line(line: str) -> bool:
@@ -3945,6 +3966,181 @@ def _queue_and_maybe_poll_remote_job(
         client.close()
 
 
+def _harden_double_wide(
+    *,
+    macro: str,
+    macro_dir: Path,
+    config_file: Path,
+    project_root_path: Path,
+    tag: Optional[str],
+    from_step: Optional[str],
+    open_in_openroad: bool,
+    open_in_klayout: bool,
+    pdk: Optional[str],
+    use_docker: bool,
+    dry_run: bool,
+    list_from_steps: bool,
+):
+    """Harden a `double_wide` macro with LibreLane 3 (native PDN-to-pad routing).
+
+    double_wide bypasses the OpenLane-2/Docker-venv path used by every other
+    project type: its upstream template ships its own `flake.nix` pinning
+    LibreLane 3, whose native PDN generator (`PDN_ENABLE_PINS`) reaches the
+    padframe-aligned power pins directly, so no bridging "connection" macro
+    or cf-cli-managed OpenLane install is needed.
+    """
+    gui_mode_count = int(open_in_openroad) + int(open_in_klayout)
+
+    if use_docker:
+        console.print("[red]✗[/red] double_wide hardening does not support --use-docker")
+        console.print(
+            "[yellow]double_wide uses the project's own Nix flake (LibreLane 3). "
+            "Install Nix: https://librelane.readthedocs.io[/yellow]"
+        )
+        raise click.Abort()
+
+    flake_dir = librelane_run.double_wide_flake_dir(project_root_path)
+    if flake_dir is None:
+        console.print(f"[red]✗[/red] No flake.nix found in {project_root_path}")
+        console.print("[yellow]double_wide projects must ship a flake.nix pinning LibreLane 3[/yellow]")
+        raise click.Abort()
+
+    if not librelane_run.double_wide_nix_available(flake_dir):
+        console.print("[red]✗[/red] Nix not available or cannot resolve the project's LibreLane 3 flake")
+        console.print("[yellow]Install Nix from: https://librelane.readthedocs.io[/yellow]")
+        raise click.Abort()
+
+    pdk_root = librelane_run.pdk_root_dir(project_root_path)
+    pdk = librelane_run.detect_pdk(project_root_path, pdk)
+
+    valid_from_steps, valid_from_steps_error = librelane_run.get_double_wide_valid_from_steps(
+        flake_dir=flake_dir, config_file=config_file, working_dir=project_root_path,
+    )
+    if valid_from_steps_error:
+        console.print("[red]✗[/red] Failed to load LibreLane 3 step list for this macro")
+        console.print(f"[yellow]Error:[/yellow] {valid_from_steps_error}")
+        sys.exit(1)
+
+    if list_from_steps:
+        console.print(f"[bold cyan]Valid --from steps for {macro}:[/bold cyan]")
+        if valid_from_steps:
+            for step_name in valid_from_steps:
+                console.print(f"  • {step_name}")
+        else:
+            console.print("[yellow]No steps found for this flow[/yellow]")
+        return
+
+    if from_step and from_step not in (valid_from_steps or []):
+        console.print(f"[red]✗[/red] Invalid --from step: {from_step}")
+        matches = difflib.get_close_matches(from_step, valid_from_steps or [], n=5, cutoff=0.4)
+        if matches:
+            console.print("[yellow]Did you mean:[/yellow]")
+            for m in matches:
+                console.print(f"  • {m}")
+        else:
+            console.print(f"[yellow]Use 'cf harden {macro} --list-from-steps' to see valid step names[/yellow]")
+        sys.exit(1)
+
+    auto_selected_latest_tag = False
+    if (from_step or gui_mode_count) and not tag:
+        runs_dir = macro_dir / 'runs'
+        candidate_runs = [p for p in runs_dir.iterdir() if p.is_dir()] if runs_dir.exists() else []
+        if not candidate_runs:
+            console.print("[red]✗[/red] No existing runs found for this macro")
+            if gui_mode_count:
+                console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
+            else:
+                console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
+            sys.exit(1)
+        latest_run = max(candidate_runs, key=lambda p: p.stat().st_mtime)
+        tag = latest_run.name
+        auto_selected_latest_tag = True
+    elif not tag:
+        tag = librelane_run.new_run_tag()
+
+    console.print("\n" + "="*60)
+    console.print(f"[bold cyan]Hardening: {macro}[/bold cyan] [dim](LibreLane 3, native PDN-to-pad routing)[/dim]")
+    console.print(f"Config: [yellow]{config_file.name}[/yellow]")
+    console.print(f"Run tag: [yellow]{tag}[/yellow]")
+    if auto_selected_latest_tag:
+        if gui_mode_count:
+            console.print("[yellow]Using latest existing run tag (auto-selected because GUI mode was requested without --tag)[/yellow]")
+        else:
+            console.print("[yellow]Using latest existing run tag (auto-selected because --from was provided without --tag)[/yellow]")
+    if from_step:
+        console.print(f"Start from: [yellow]{from_step}[/yellow]")
+        console.print("[yellow]Mode:[/yellow] resume from existing state under this tag (no overwrite)")
+    if open_in_openroad:
+        console.print("[yellow]Mode:[/yellow] open existing run in OpenROAD GUI")
+    elif open_in_klayout:
+        console.print("[yellow]Mode:[/yellow] open existing run in KLayout GUI")
+    console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    console.print(f"PDK Root: [yellow]{pdk_root}[/yellow]")
+    console.print("Execution: [yellow]Nix (project flake, LibreLane 3)[/yellow]")
+    console.print("="*60 + "\n")
+
+    cmd, env = librelane_run.build_double_wide_librelane_command(
+        project_root=project_root_path,
+        flake_dir=flake_dir,
+        config_file=config_file,
+        pdk_root=pdk_root,
+        pdk=pdk,
+        tag=tag,
+        from_step=from_step,
+        open_in_openroad=open_in_openroad,
+        open_in_klayout=open_in_klayout,
+    )
+
+    if dry_run:
+        console.print("[yellow]Dry run - command that would be executed:[/yellow]")
+        console.print(" ".join(cmd))
+        return
+
+    console.print(f"[cyan]Running LibreLane 3 via Nix on {macro}...[/cyan]")
+
+    process = None
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(project_root_path),
+            env=env,
+            preexec_fn=os.setsid if os.name != 'nt' else None,
+        )
+        returncode = process.wait()
+
+        if returncode == 0:
+            console.print(f"\n[green]✓[/green] [bold green]Successfully hardened {macro}![/bold green]")
+            console.print(f"[dim]Run directory: {macro_dir}/runs/{tag}/[/dim]")
+        elif returncode == -2 or returncode == 130:  # SIGINT
+            console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
+            sys.exit(130)
+        else:
+            console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {returncode}[/bold red]")
+            console.print(f"[yellow]Check logs in: {macro_dir}/runs/{tag}/[/yellow]")
+            sys.exit(returncode)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
+        try:
+            if process is not None:
+                if os.name != 'nt':
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    process.wait(timeout=5)
+                else:
+                    process.terminate()
+                    process.wait(timeout=5)
+        except Exception:
+            if process is not None:
+                if os.name != 'nt':
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                else:
+                    process.kill()
+        sys.exit(130)
+    except Exception as e:
+        console.print(f"\n[red]✗[/red] Error: {e}")
+        sys.exit(1)
+
+
 @main.command(
     'harden',
     cls=CategorizedCommand,
@@ -4001,6 +4197,11 @@ def harden(
     wait_timeout,
 ):
     """Harden a macro using LibreLane (OpenLane 2).
+
+    For `double_wide` projects, hardens the single flat wrapper design with
+    LibreLane 3 instead (using the project's own pinned flake.nix), since its
+    native PDN generator routes directly to the padframe-aligned power pins.
+    Every other project type is unaffected and keeps using OpenLane 2.
 
     Examples:
         cf harden user_proj_example
@@ -4059,7 +4260,7 @@ def harden(
             wait_timeout=wait_timeout,
             label="Remote PNR",
         )
-        return
+        sys.exit(1)
     
     # Check if project is initialized (skip check for --list or when no macro specified, allow graceful return)
     if not list_designs and macro:
@@ -4074,24 +4275,26 @@ def harden(
     if not openlane_dir.exists():
         console.print(f"[red]✗[/red] OpenLane directory not found: {openlane_dir}")
         console.print("[yellow]Run 'cf setup' first to install OpenLane[/yellow]")
-        return
+        if list_designs:
+            return
+        sys.exit(1)
     
     if list_from_steps and not macro:
         console.print("[red]✗[/red] --list-from-steps requires a macro name")
         console.print("[yellow]Example:[/yellow] cf harden user_proj_example --list-from-steps")
-        return
+        sys.exit(1)
 
     gui_mode_count = int(open_in_openroad) + int(open_in_klayout)
     if gui_mode_count > 1:
         console.print("[red]✗[/red] Use only one GUI flag: --open-in-openroad or --open-in-klayout")
-        return
+        sys.exit(1)
     if gui_mode_count and from_step:
         console.print("[red]✗[/red] --from cannot be combined with GUI modes")
         console.print("[yellow]Use --tag to select which run to open, or omit --tag to use latest run[/yellow]")
-        return
+        sys.exit(1)
     if gui_mode_count and list_from_steps:
         console.print("[red]✗[/red] --list-from-steps cannot be combined with GUI modes")
-        return
+        sys.exit(1)
 
     # If no macro specified, show prompt with available macros
     no_macro_specified = not macro and not list_designs and not list_from_steps
@@ -4123,7 +4326,7 @@ def harden(
     if not macro_dir.exists():
         console.print(f"[red]✗[/red] Macro not found: {macro}")
         console.print(f"[yellow]Run 'cf harden --list' to see available macros[/yellow]")
-        return
+        sys.exit(1)
     
     # Find config file
     config_file = None
@@ -4136,8 +4339,29 @@ def harden(
     if not config_file:
         console.print(f"[red]✗[/red] No config file found for {macro}")
         console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
+        sys.exit(1)
+
+    # `double_wide` is hardened as one flat design with LibreLane 3's native
+    # PDN-to-pad routing, using the project's own pinned flake.nix instead of
+    # cf-cli's OpenLane-2 Nix/Docker install. Every other project type falls
+    # through to the existing OpenLane 2 (CI2511) flow below, unaffected.
+    if read_project_type(project_root_path) == "double_wide":
+        _harden_double_wide(
+            macro=macro,
+            macro_dir=macro_dir,
+            config_file=Path(config_file),
+            project_root_path=project_root_path,
+            tag=tag,
+            from_step=from_step,
+            open_in_openroad=open_in_openroad,
+            open_in_klayout=open_in_klayout,
+            pdk=pdk,
+            use_docker=use_docker,
+            dry_run=dry_run,
+            list_from_steps=list_from_steps,
+        )
         return
-    
+
     # Check for LibreLane venv
     librelane_venv = openlane_dir / '.venv'
     if not librelane_venv.exists():
@@ -4178,7 +4402,7 @@ def harden(
             "        continue\n"
             "    seen.add(step_id)\n"
             "    steps.append(step_id)\n"
-            "print(json.dumps({'steps': steps}))\n"
+            f"print({_STEPS_MARKER!r} + json.dumps({{'steps': steps}}))\n"
         )
         result = subprocess.run(
             [str(librelane_python), '-c', script, macro_config],
@@ -4190,8 +4414,7 @@ def harden(
             err = (result.stderr or result.stdout or 'unknown error').strip()
             return None, err
         try:
-            payload = json.loads(result.stdout.strip())
-            return payload.get('steps', []), None
+            return _parse_librelane_steps(result.stdout), None
         except Exception as exc:
             return None, str(exc)
 
@@ -4206,7 +4429,7 @@ def harden(
         console.print("[red]✗[/red] Failed to load LibreLane step list for this macro")
         console.print(f"[yellow]Error:[/yellow] {valid_from_steps_error}")
         console.print("[yellow]Run 'cf setup --only-openlane' to ensure LibreLane is installed correctly[/yellow]")
-        return
+        sys.exit(1)
 
     if list_from_steps:
         console.print(f"[bold cyan]Valid --from steps for {macro}:[/bold cyan]")
@@ -4226,7 +4449,7 @@ def harden(
                 console.print(f"  • {m}")
         else:
             console.print(f"[yellow]Use 'cf harden {macro} --list-from-steps' to see valid step names[/yellow]")
-        return
+        sys.exit(1)
     
     # Fetch versions from upstream
     console.print("[dim]Fetching version information from cf-cli repository...[/dim]")
@@ -4250,7 +4473,7 @@ def harden(
     # Check for conflicting flags
     if force_nix_flag and force_docker_flag:
         console.print("[red]✗[/red] Cannot use both --use-nix and --use-docker")
-        return
+        sys.exit(1)
     
     # Check if Nix is available
     if force_nix_flag or not force_docker_flag:
@@ -4321,7 +4544,7 @@ def harden(
     if not pdk_dir.exists():
         console.print(f"[red]✗[/red] PDK not found: {pdk_dir}")
         console.print("[yellow]Run 'cf setup --only-pdk' to install the PDK[/yellow]")
-        return
+        sys.exit(1)
     
     auto_selected_latest_tag = False
     if (from_step or gui_mode_count) and not tag:
@@ -4332,7 +4555,7 @@ def harden(
                 console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
             else:
                 console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
-            return
+            sys.exit(1)
         candidate_runs = [p for p in runs_dir.iterdir() if p.is_dir()]
         if not candidate_runs:
             console.print("[red]✗[/red] No existing runs found for this macro")
@@ -4340,7 +4563,7 @@ def harden(
                 console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
             else:
                 console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
-            return
+            sys.exit(1)
         latest_run = max(candidate_runs, key=lambda p: p.stat().st_mtime)
         tag = latest_run.name
         auto_selected_latest_tag = True
@@ -4471,13 +4694,13 @@ def harden(
         
         if returncode == 0:
             console.print(f"\n[green]✓[/green] [bold green]Successfully hardened {macro}![/bold green]")
-            console.print(f"[dim]Results saved to: {project_root_path}/runs/{macro}/{tag}/[/dim]")
+            console.print(f"[dim]Run directory: {macro_dir}/runs/{tag}/[/dim]")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
             sys.exit(130)
         else:
             console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {returncode}[/bold red]")
-            console.print(f"[yellow]Check logs in: {project_root_path}/runs/{macro}/{tag}/[/yellow]")
+            console.print(f"[yellow]Check logs in: {macro_dir}/runs/{tag}/[/yellow]")
             sys.exit(returncode)
             
     except KeyboardInterrupt:
@@ -4495,8 +4718,10 @@ def harden(
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             else:
                 process.kill()
+        sys.exit(130)
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error: {e}")
+        sys.exit(1)
 
 @main.group('repo')
 def repo_group():
@@ -4860,7 +5085,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
     
-    if project_type != 'openframe':
+    if not is_padframe_only(project_type):
         gpio_config = get_gpio_config_from_project_json(str(project_json_path))
         if not gpio_config or len(gpio_config) == 0:
             console.print("[red]✗[/red] GPIO configuration not found in project.json")
@@ -4882,20 +5107,31 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     if not (pdk_root / pdk).exists():
         console.print(f"[red]✗[/red] PDK not found at {pdk_root / pdk}")
         console.print("[yellow]Run 'cf setup --only-pdk' to install[/yellow]")
-        return
+        sys.exit(1)
     
     if shutil.which('docker') is None:
         console.print("[red]✗[/red] Docker not found. Docker is required to run precheck.")
-        return
+        sys.exit(1)
     
     pdk_path = pdk_root / pdk
-    
+
+    # The precheck image ships caravel at /opt/caravel. Other harnesses are
+    # installed by `cf setup` into <project>/caravel, which is mounted below.
+    golden_root = '/opt/caravel'
+    if project_type in HARNESS_REPOS:
+        harness_dir = project_root_path / 'caravel'
+        if not harness_dir.is_dir():
+            console.print(f"[red]✗[/red] {project_type} harness not found at {harness_dir}")
+            console.print("[yellow]Run 'cf setup --only-caravel' to install it[/yellow]")
+            sys.exit(1)
+        golden_root = str(harness_dir.resolve())
+
     docker_image = 'chipfoundry/mpw_precheck:latest'
     
     precheck_args = [
         '-i', str(project_root_path),
         '-p', str(pdk_path),
-        '-c', '/opt/caravel',
+        '-c', golden_root,
     ]
     
     if magic_drc:
@@ -4909,13 +5145,33 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     if skip_checks:
         precheck_args.extend(['--skip-checks'] + list(skip_checks))
     
-    inner_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null && exec cf-precheck ' + ' '.join(precheck_args)
+    # CF_PRECHECK_SOURCE points at a local cf-precheck checkout to test
+    # unreleased changes; otherwise the latest release is installed from PyPI.
+    precheck_source = os.environ.get('CF_PRECHECK_SOURCE')
+    if precheck_source:
+        precheck_source = str(Path(precheck_source).expanduser().resolve())
+        if not (Path(precheck_source) / 'pyproject.toml').is_file():
+            console.print(f"[red]✗[/red] CF_PRECHECK_SOURCE is not a cf-precheck checkout: {precheck_source}")
+            sys.exit(1)
+        install_cmd = (
+            f'cp -r {shlex.quote(precheck_source)} /tmp/cf-precheck-src && '
+            'pip3 install -q --root-user-action=ignore /tmp/cf-precheck-src'
+        )
+    else:
+        install_cmd = 'pip3 install --upgrade -q --root-user-action=ignore cf-precheck 2>/dev/null'
+    inner_cmd = install_cmd + ' && exec cf-precheck ' + ' '.join(precheck_args)
     
     docker_cmd = [
         'docker', 'run', '--rm', '--init',
         '--platform', 'linux/amd64',
         '-v', f'{project_root_path}:{project_root_path}',
         '-v', f'{pdk_root}:{pdk_root}',
+    ]
+    if golden_root != '/opt/caravel' and not golden_root.startswith(f'{project_root_path}/'):
+        docker_cmd += ['-v', f'{golden_root}:{golden_root}']
+    if precheck_source:
+        docker_cmd += ['-v', f'{precheck_source}:{precheck_source}:ro']
+    docker_cmd += [
         '-e', f'PDK_ROOT={pdk_root}',
         '-e', f'PDK_PATH={pdk_path}',
         '-e', f'PDKPATH={pdk_path}',
@@ -4928,6 +5184,8 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     console.print("[bold cyan]CF Precheck[/bold cyan]")
     console.print(f"Project: [yellow]{project_root_path}[/yellow]")
     console.print(f"PDK: [yellow]{pdk}[/yellow]")
+    if precheck_source:
+        console.print(f"cf-precheck: [yellow]{precheck_source}[/yellow] (CF_PRECHECK_SOURCE)")
     if skip_checks:
         console.print(f"Skipping: [yellow]{', '.join(skip_checks)}[/yellow]")
     if magic_drc:
@@ -4957,7 +5215,7 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         )
         if result.returncode != 0:
             console.print(f"[red]✗[/red] Docker image '{docker_image}' not found. Run 'cf setup --only-precheck' or check your connection.")
-            return
+            sys.exit(1)
         console.print("[yellow]⚠[/yellow] Could not check for image updates (using cached image)")
     
     console.print("[cyan]Running cf-precheck...[/cyan]\n")
@@ -4990,6 +5248,35 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
         sys.exit(130)
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error running precheck: {e}")
+        sys.exit(1)
+
+_STEPS_MARKER = 'CF_STEPS_JSON='
+
+
+def _parse_librelane_steps(stdout: str):
+    """Extract the step list printed by the `cf harden` step-list probe."""
+    # LibreLane's console may emit terminal control sequences around the
+    # payload (e.g. a show-cursor escape at exit), so locate it by marker.
+    for line in stdout.splitlines():
+        idx = line.find(_STEPS_MARKER)
+        if idx != -1:
+            payload, _ = json.JSONDecoder().raw_decode(line[idx + len(_STEPS_MARKER):])
+            return payload.get('steps', [])
+    raise ValueError('step list not found in LibreLane output')
+
+
+def _cocotb_run_results(run_dir: Path):
+    """Return (passed, failed) test directory names for a caravel_cocotb run."""
+    passed, failed = [], []
+    if not run_dir.is_dir():
+        return passed, failed
+    for test_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
+        if (test_dir / 'failed').exists():
+            failed.append(test_dir.name)
+        elif (test_dir / 'passed').exists():
+            passed.append(test_dir.name)
+    return passed, failed
+
 
 @main.command('verify')
 @click.argument('test', required=False)
@@ -5090,14 +5377,16 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
     
     project_json_path = project_root_path / '.cf' / 'project.json'
     
-    # Get project type (needed for openframe flag)
     with open(project_json_path, 'r') as f:
         project_data = json.load(f)
     project_type = project_data.get('project', {}).get('type', 'digital')
-    
-    # Check if GPIO configuration exists (skip check if just listing tests or openframe)
+    # Bare-padframe projects run caravel_cocotb in OpenFrame mode against the
+    # harness in <project>/caravel (its toplevel_cocotb.v sets the pad count).
+    padframe_only = is_padframe_only(project_type)
+
+    # Check if GPIO configuration exists (skip check if just listing tests or padframe-only)
     if not list_tests:
-        if project_type != 'openframe':
+        if not padframe_only:
             gpio_config = get_gpio_config_from_project_json(str(project_json_path))
             if not gpio_config or len(gpio_config) == 0:
                 console.print("[red]✗[/red] GPIO configuration not found in project.json")
@@ -5197,7 +5486,7 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
     
     if dry_run:
         console.print("[bold yellow]Dry run - configuration ready[/bold yellow]\n")
-        openframe_flag = " --openframe" if project_type == 'openframe' else ""
+        openframe_flag = " --openframe" if padframe_only else ""
         if test:
             console.print(f"Would run: {caravel_cocotb_bin} -t {test} -sim {sim_arg}{openframe_flag}")
         elif run_all:
@@ -5257,12 +5546,15 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
     if sim.lower() == 'gl':
         cmd.extend(['-sim', 'GL'])
     
-    # Add openframe flag for openframe projects
-    if project_type == 'openframe':
+    if padframe_only:
         cmd.append('--openframe')
     
     # Add CI flag to disable Docker interactive mode (required when not running in a terminal)
     cmd.append('--CI')
+
+    from datetime import datetime
+    run_tag = f"cf_verify_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    cmd.extend(['-tag', run_tag])
     
     # Run cocotb tests
     console.print(f"[cyan]Running cocotb verification...[/cyan]")
@@ -5278,9 +5570,20 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
         
         # Wait for process to complete
         returncode = process.wait()
-        
+
         if returncode == 0:
-            console.print(f"\n[green]✓[/green] Verification passed!")
+            # caravel_cocotb exits 0 even when tests fail; it records the
+            # outcome as a 'passed' / 'failed' marker file in each test dir.
+            passed, failed = _cocotb_run_results(cocotb_dir / 'sim' / run_tag)
+            if failed or not passed:
+                console.print(
+                    f"\n[red]✗[/red] Verification failed: {len(failed)} failed, {len(passed)} passed"
+                )
+                for name in failed:
+                    console.print(f"  [red]•[/red] {name}")
+                console.print(f"[yellow]Check logs in: {cocotb_dir / 'sim' / run_tag}[/yellow]")
+                sys.exit(1)
+            console.print(f"\n[green]✓[/green] Verification passed! ({len(passed)} test(s))")
         elif returncode == -2 or returncode == 130:  # SIGINT
             console.print("\n[yellow]⚠[/yellow] Verification interrupted by user")
             sys.exit(130)
@@ -5304,8 +5607,10 @@ def verify(test, project_root, sim, list_tests, run_all, tag, dry_run, remote, p
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             else:
                 process.kill()
+        sys.exit(130)
     except Exception as e:
         console.print(f"\n[red]✗[/red] Error: {e}")
+        sys.exit(1)
 
 
 DEFAULT_API_URL = 'https://api.chipfoundry.io'

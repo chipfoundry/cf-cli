@@ -24,7 +24,33 @@ GDS_TYPE_MAP = {
     'user_analog_project_wrapper.gds.gz': 'analog',
     'openframe_project_wrapper.gds': 'openframe',
     'openframe_project_wrapper.gds.gz': 'openframe',
+    'double_wide_openframe_project_wrapper.gds': 'double_wide',
+    'double_wide_openframe_project_wrapper.gds.gz': 'double_wide',
 }
+
+PROJECT_TYPES: Tuple[str, ...] = ("digital", "analog", "openframe", "double_wide")
+
+# Bare-padframe project types: no management SoC, no user_defines.v and no
+# GPIO configuration. The user wrapper drives every pad control signal.
+PADFRAME_ONLY_TYPES = frozenset({"openframe", "double_wide"})
+
+# Project types whose harness is not caravel / caravel-lite. `cf setup` clones
+# the harness into <project>/caravel so CARAVEL_ROOT keeps working for cocotb
+# and precheck.
+HARNESS_REPOS: Dict[str, str] = {
+    "double_wide": "https://github.com/chipfoundry/double_wide_openframe",
+}
+DEFAULT_HARNESS_REF = "main"
+
+# `double_wide` is hardened as one flat design (no separate macros), and its
+# upstream template ships its own flake.nix pinning LibreLane 3: the native
+# PDN generator reaches the padframe-aligned power pins directly, so no
+# bridging "connection" macro is needed. Every other project type keeps using
+# `openlane_version` (LibreLane/OpenLane 2, fetched from cf-cli's versions.json).
+# Pin the exact commit (not the `3.1.0.dev2` tag) so `nix` resolves it from the
+# local store/cache without an unauthenticated GitHub API call that can 403.
+DOUBLE_WIDE_LIBRELANE_REPO = "github:librelane/librelane"
+DOUBLE_WIDE_LIBRELANE_REV = "f18a07aabb2dd3d6a7e3acc8c3b3621baa784a08"  # 3.1.0.dev2
 
 # Canonical GDS wrapper layouts used by remote precheck and remote push.
 # Each entry is (project_kind, base path without suffix). Suffixes below.
@@ -34,8 +60,34 @@ GDS_WRAPPER_BASES: Tuple[Tuple[str, str], ...] = (
     ("analog", "gds/user_analog_project_wrapper"),
     ("digital", "gds/user_project_wrapper"),
     ("openframe", "gds/openframe_project_wrapper"),
+    ("double_wide", "gds/double_wide_openframe_project_wrapper"),
 )
 GDS_WRAPPER_SUFFIXES: Tuple[str, ...] = (".gds", ".gds.gz")
+
+
+def is_padframe_only(project_type: Optional[str]) -> bool:
+    """True for project types that have no management SoC or user_defines.v."""
+    return project_type in PADFRAME_ONLY_TYPES
+
+
+def read_project_type(project_root: Path, default: str = "digital") -> str:
+    """Read `project.type` from `.cf/project.json`, defaulting if missing/unreadable."""
+    project_json_path = Path(project_root) / ".cf" / "project.json"
+    if project_json_path.is_file():
+        try:
+            data = json.loads(project_json_path.read_text())
+            project_type = data.get("project", {}).get("type")
+            if isinstance(project_type, str) and project_type.strip():
+                return project_type.strip()
+        except (json.JSONDecodeError, IOError):
+            pass
+    return default
+
+
+def harness_ref(project_type: str, versions: Optional[dict] = None) -> str:
+    """Git ref of the harness that `cf setup` installs for ``project_type``."""
+    refs = (versions or {}).get("harness_refs") or {}
+    return refs.get(project_type) or DEFAULT_HARNESS_REF
 
 USER_DEFINES_REL = "verilog/rtl/user_defines.v"
 CF_PROJECT_JSON_REL = ".cf/project.json"
@@ -89,7 +141,7 @@ def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
     Collect required project files from the given project_root.
     Returns a dict mapping logical names to absolute file paths (or None if not found and optional).
     Raises FileNotFoundError if any required file is missing.
-    Openframe projects do not require user_defines.v.
+    Openframe and double-wide projects do not require user_defines.v.
     """
     project_root = Path(project_root)
     collected = {}
@@ -158,13 +210,12 @@ def collect_project_files(project_root: str) -> Dict[str, Optional[str]]:
         gds_name, gds_path = gds_file_to_use
         collected[f"gds/{gds_name}"] = gds_path
 
-        # Collect standard required files (user_defines.v not required for openframe)
         cf_json_path = project_root / ".cf" / "project.json"
         collected[".cf/project.json"] = str(cf_json_path) if cf_json_path.exists() else None
 
         user_defines_path = project_root / "verilog" / "rtl" / "user_defines.v"
-        if project_type == "openframe":
-            collected["verilog/rtl/user_defines.v"] = None  # openframe does not use user_defines.v
+        if is_padframe_only(project_type):
+            collected["verilog/rtl/user_defines.v"] = None
         else:
             if user_defines_path.exists():
                 collected["verilog/rtl/user_defines.v"] = str(user_defines_path)
