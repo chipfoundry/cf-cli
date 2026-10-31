@@ -3661,8 +3661,13 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
                     )
                     # Install from GitHub source (workaround: PyPI package is under efabless, we use chipfoundry repo)
                     env = os.environ.copy()
-                    if sys.platform == 'darwin':
-                        env['LDSHARED'] = 'clang++ -dynamiclib -undefined dynamic_lookup'
+                    # cocotb 1.9.2 rewrites -bundle to -dynamiclib on the stdlib distutils
+                    # config, but an isolated pip build links with setuptools' vendored
+                    # distutils and never sees that change. Python 3.12+ has no stdlib
+                    # distutils, so this only applies to older interpreters. The venv is
+                    # created with sys.executable, so sys.version_info matches it.
+                    if sys.platform == 'darwin' and sys.version_info < (3, 12):
+                        env['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
                     subprocess.run(
                         [
                             venv_python, '-m', 'pip', 'install', '--upgrade', '--no-cache-dir',
@@ -3710,9 +3715,22 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
             except subprocess.CalledProcessError as e:
                 maybe_abort_no_space(e, "Cocotb setup")
                 had_errors = True
-                console.print(f"[red]✗[/red] Failed to set up Cocotb: {e}")
-                if e.stderr:
-                    console.print(f"[dim]{e.stderr}[/dim]")
+                cmd_parts = e.cmd if isinstance(e.cmd, (list, tuple)) else [str(e.cmd)]
+                is_cocotb_install = any(
+                    "caravel-sim-infrastructure" in str(part) for part in cmd_parts
+                )
+                if is_cocotb_install:
+                    console.print("[red]✗[/red] Failed to set up Cocotb")
+                    stderr = e.stderr or b""
+                    if isinstance(stderr, bytes):
+                        stderr = stderr.decode(errors="replace")
+                    tail = "\n".join(stderr.splitlines()[-25:])
+                    if tail:
+                        console.print(f"[dim]{tail}[/dim]")
+                else:
+                    console.print(f"[red]✗[/red] Failed to set up Cocotb: {e}")
+                    if e.stderr:
+                        console.print(f"[dim]{e.stderr}[/dim]")
             except Exception as e:
                 maybe_abort_no_space(e, "Cocotb setup")
                 had_errors = True
