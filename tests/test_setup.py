@@ -7,6 +7,7 @@ from chipfoundry_cli.main import main
 from pathlib import Path
 import json
 import shutil
+import subprocess
 import tempfile
 import os
 
@@ -302,6 +303,77 @@ class TestSetupVersionChecking:
         # May fail due to version fetching in CI, but should recognize arguments
         assert result.exit_code in [0, 1]
         assert 'caravel' in result.output.lower() or 'dry' in result.output.lower() or 'version' in result.output.lower()
+
+    def _init_project(self, project_dir):
+        cf_dir = Path(project_dir) / '.cf'
+        cf_dir.mkdir(parents=True, exist_ok=True)
+        (cf_dir / 'project.json').write_text(json.dumps({
+            "project": {"name": "cocotb-test", "type": "digital"}
+        }))
+
+    def _cocotb_install_env(self, temp_project_dir, monkeypatch, platform, version_info):
+        import chipfoundry_cli.main as cf_main
+
+        self._init_project(temp_project_dir)
+        monkeypatch.delenv("LDSHARED", raising=False)
+        monkeypatch.delenv("SETUPTOOLS_USE_DISTUTILS", raising=False)
+        monkeypatch.setattr(cf_main.sys, "platform", platform)
+        monkeypatch.setattr(cf_main.sys, "version_info", version_info)
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append((list(cmd), kwargs.get("env")))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(cf_main.subprocess, "run", fake_run)
+        result = CliRunner().invoke(main, [
+            'setup', '--project-root', temp_project_dir, '--only-cocotb', '--overwrite',
+        ])
+        assert result.exit_code == 0, result.output
+        installs = [
+            env for cmd, env in calls
+            if any('caravel-sim-infrastructure' in str(part) for part in cmd)
+        ]
+        assert len(installs) == 1
+        return installs[0]
+
+    def test_cocotb_install_uses_stdlib_distutils_on_macos_before_312(self, temp_project_dir, monkeypatch):
+        env = self._cocotb_install_env(temp_project_dir, monkeypatch, 'darwin', (3, 11, 8))
+        assert env['SETUPTOOLS_USE_DISTUTILS'] == 'stdlib'
+        assert 'LDSHARED' not in env
+
+    def test_cocotb_install_skips_stdlib_distutils_on_python_312(self, temp_project_dir, monkeypatch):
+        env = self._cocotb_install_env(temp_project_dir, monkeypatch, 'darwin', (3, 12, 0))
+        assert 'SETUPTOOLS_USE_DISTUTILS' not in env
+        assert 'LDSHARED' not in env
+
+    def test_cocotb_install_skips_stdlib_distutils_off_macos(self, temp_project_dir, monkeypatch):
+        env = self._cocotb_install_env(temp_project_dir, monkeypatch, 'linux', (3, 11, 8))
+        assert 'SETUPTOOLS_USE_DISTUTILS' not in env
+        assert 'LDSHARED' not in env
+
+    def test_cocotb_install_failure_prints_stderr_tail(self, temp_project_dir, monkeypatch):
+        import chipfoundry_cli.main as cf_main
+
+        self._init_project(temp_project_dir)
+        log = "\n".join(f"copying file {i}" for i in range(40)).encode()
+
+        def fake_run(cmd, *args, **kwargs):
+            if any('caravel-sim-infrastructure' in str(part) for part in cmd):
+                raise subprocess.CalledProcessError(1, cmd, stderr=log)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(cf_main.subprocess, "run", fake_run)
+        result = CliRunner().invoke(main, [
+            'setup', '--project-root', temp_project_dir, '--only-cocotb', '--overwrite',
+        ])
+        assert result.exit_code == 1
+        assert "Failed to set up Cocotb" in result.output
+        assert "CalledProcessError" not in result.output
+        assert "copying file 15" in result.output
+        assert "copying file 39" in result.output
+        assert "copying file 14" not in result.output
+        assert "Setup completed with errors" in result.output
 
 
 if __name__ == '__main__':
