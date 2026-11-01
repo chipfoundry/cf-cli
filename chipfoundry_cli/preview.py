@@ -41,6 +41,9 @@ LINT_PASSED = "passed"
 LINT_FAILED = "failed"
 LINT_SKIPPED = "skipped"
 
+AREA_SOURCE_DIE = "die_area"
+AREA_SOURCE_SYNTHESIS = "synthesis"
+
 _ELABORATE_ONLY_STRATEGIES = {
     STRATEGY_HIER_MACRO_FIRST,
     STRATEGY_HIER_MACRO_FIRST_LEGACY,
@@ -103,6 +106,30 @@ def die_area_mm2(config: Dict[str, Any]) -> Optional[Decimal]:
     if um2 <= 0:
         return None
     return (Decimal(str(um2)) / Decimal("1000000")).quantize(Decimal("0.0001"))
+
+
+def floorplan_area_is_fixed(config: Dict[str, Any]) -> bool:
+    """True when DIE_AREA is the macro footprint LibreLane will use.
+
+    ``FP_SIZING=relative`` sizes the die from synthesized cells. Absolute
+    sizing, and a DIE_AREA with no FP_SIZING, is a fixed footprint.
+    """
+    sizing = config.get("FP_SIZING")
+    if isinstance(sizing, str) and sizing.strip().lower() == "relative":
+        return False
+    return die_area_mm2(config) is not None
+
+
+def _apply_die_area(row: Dict[str, Any], config: Dict[str, Any]) -> None:
+    """Record DIE_AREA. A fixed footprint is not replaced by synthesis later."""
+    area = die_area_mm2(config)
+    if area is None:
+        return
+    if floorplan_area_is_fixed(config):
+        row["estimated_area_mm2"] = str(area)
+        row["area_source"] = AREA_SOURCE_DIE
+    elif row.get("estimated_area_mm2") is None:
+        row["estimated_area_mm2"] = str(area)
 
 
 def _stem_from_view_path(value: Any) -> Optional[str]:
@@ -262,6 +289,7 @@ def scan_project(project_root: Path) -> Dict[str, Any]:
                     "source": "cli_preview",
                     "config_path": row["config_path"],
                     "estimated_area_mm2": None,
+                    "area_source": None,
                     "gate_count": None,
                     "instances": [],
                     "integration_strategy": None,
@@ -283,7 +311,7 @@ def scan_project(project_root: Path) -> Dict[str, Any]:
         else:
             parent = design_name.strip()
 
-        area = die_area_mm2(config)
+        is_new = parent not in macros_by_name
         parent_row = macros_by_name.setdefault(
             parent,
             {
@@ -292,19 +320,23 @@ def scan_project(project_root: Path) -> Dict[str, Any]:
                 "is_top_level": False,
                 "source": "cli_preview",
                 "config_path": row["config_path"],
-                "estimated_area_mm2": str(area) if area is not None else None,
+                "estimated_area_mm2": None,
+                "area_source": None,
                 "gate_count": None,
                 "instances": [],
                 "integration_strategy": None,
                 "lint_status": None,
             },
         )
-        if parent_row["config_path"] != row["config_path"]:
+        if is_new or not parent_row.get("config_path") or parent_row["config_path"] == row["config_path"]:
+            if not is_new and not parent_row.get("config_path"):
+                parent_row["config_path"] = row["config_path"]
+                parent_row["notes"] = f"from {row['config_path']}"
+            _apply_die_area(parent_row, config)
+        else:
             notes.append(
                 f"Multiple configs declare DESIGN_NAME {parent!r}; using {parent_row['config_path']}"
             )
-        elif area is not None and parent_row["estimated_area_mm2"] is None:
-            parent_row["estimated_area_mm2"] = str(area)
 
         macro_section = config.get("MACROS")
         if isinstance(macro_section, dict):
@@ -330,6 +362,7 @@ def scan_project(project_root: Path) -> Dict[str, Any]:
                         "source": "cli_preview",
                         "config_path": None,
                         "estimated_area_mm2": None,
+                        "area_source": None,
                         "gate_count": None,
                         "instances": [],
                         "integration_strategy": STRATEGY_HARD_IP,
@@ -362,6 +395,7 @@ def scan_project(project_root: Path) -> Dict[str, Any]:
                     "source": "cli_preview",
                     "config_path": None,
                     "estimated_area_mm2": None,
+                    "area_source": None,
                     "gate_count": None,
                     "instances": [],
                     "integration_strategy": STRATEGY_HARD_IP,
@@ -471,12 +505,13 @@ def apply_synth_metrics(
         macro["lint_status"] = LINT_FAILED
     if strategy_uses_gate_count(strategy):
         macro["gate_count"] = metrics["gate_count"]
-        area = metrics.get("estimated_area_mm2")
-        if area is not None:
-            macro["estimated_area_mm2"] = str(area)
-    elif macro.get("estimated_area_mm2") is None and metrics.get("estimated_area_mm2") is not None:
-        # Keep DIE_AREA / catalog area; do not treat Yosys cells as gates.
-        pass
+        # Cell area is the sum of synthesized gates. A fixed DIE_AREA is the
+        # footprint OpenLane will actually build.
+        if macro.get("area_source") != AREA_SOURCE_DIE:
+            area = metrics.get("estimated_area_mm2")
+            if area is not None:
+                macro["estimated_area_mm2"] = str(area)
+                macro["area_source"] = AREA_SOURCE_SYNTHESIS
 
 
 def leaf_summary(macros: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -675,6 +710,7 @@ def build_preview_payload(
             "source": "cli_preview",
             "config_path": row.get("config_path"),
             "estimated_area_mm2": row.get("estimated_area_mm2"),
+            "area_source": row.get("area_source"),
             "gate_count": row.get("gate_count"),
             "instances": row.get("instances") or [],
             "integration_strategy": row.get("integration_strategy"),
