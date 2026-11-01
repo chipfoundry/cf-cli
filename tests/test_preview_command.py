@@ -115,6 +115,7 @@ def test_scan_hierarchy_and_ipm(tmp_path: Path):
             {
                 "DESIGN_NAME": "user_proj_example",
                 "VERILOG_FILES": ["dir::../../verilog/rtl/user_proj_example.v"],
+                "FP_SIZING": "absolute",
                 "DIE_AREA": [0, 0, 2800, 1760],
             }
         ),
@@ -131,6 +132,10 @@ def test_scan_hierarchy_and_ipm(tmp_path: Path):
     assert by_name["user_proj_example"]["instances"] == [
         {"parent_macro": "user_project_wrapper", "count": 1}
     ]
+    assert by_name["user_proj_example"]["estimated_area_mm2"] == "4.9280"
+    assert by_name["user_proj_example"]["area_source"] == "die_area"
+    assert by_name["user_project_wrapper"]["estimated_area_mm2"] == "10.2784"
+    assert by_name["user_project_wrapper"]["area_source"] == "die_area"
     assert any(item["name"] == "CF_SRAM_1024x32" for item in scan["marketplace_ip"])
 
 
@@ -192,9 +197,24 @@ def test_parse_synth_metrics_and_skip_gates_for_wrapper(tmp_path: Path):
         "integration_strategy": STRATEGY_FLATTENED_RTL,
         "gate_count": None,
         "estimated_area_mm2": None,
+        "area_source": None,
     }
     apply_synth_metrics(leaf, metrics, lint_errors=0)
     assert leaf["gate_count"] == 1234
+    assert leaf["estimated_area_mm2"] == "0.05"
+    assert leaf["area_source"] == "synthesis"
+
+    fixed = {
+        "name": "user_proj_example",
+        "integration_strategy": STRATEGY_FLATTENED_RTL,
+        "gate_count": None,
+        "estimated_area_mm2": "4.9280",
+        "area_source": "die_area",
+    }
+    apply_synth_metrics(fixed, metrics, lint_errors=0)
+    assert fixed["gate_count"] == 1234
+    assert fixed["estimated_area_mm2"] == "4.9280"
+    assert fixed["area_source"] == "die_area"
 
 
 def test_leaf_summary_partial_metrics():
@@ -225,6 +245,72 @@ def test_leaf_summary_partial_metrics():
     assert summary["known_gate_count"] == 200
     assert summary["total_gate_count"] is None
     assert summary["missing_gate_count_macro_count"] == 1
+
+
+def test_scan_applies_die_area_when_wrapper_config_is_seen_first(tmp_path: Path):
+    _init_project(tmp_path)
+    _write(
+        tmp_path / "openlane" / "a_wrapper" / "config.json",
+        json.dumps(
+            {
+                "DESIGN_NAME": "a_wrapper",
+                "SYNTH_ELABORATE_ONLY": True,
+                "MACROS": {
+                    "user_proj_example": {
+                        "gds": ["dir::../../gds/user_proj_example.gds"],
+                        "lef": ["dir::../../lef/user_proj_example.lef"],
+                        "instances": {"mprj": {}},
+                    }
+                },
+            }
+        ),
+    )
+    _write(
+        tmp_path / "openlane" / "user_proj_example" / "config.json",
+        json.dumps(
+            {
+                "DESIGN_NAME": "user_proj_example",
+                "VERILOG_FILES": ["a.v"],
+                "FP_SIZING": "absolute",
+                "DIE_AREA": "0 0 2800 1760",
+            }
+        ),
+    )
+    scan = scan_project(tmp_path)
+    by_name = {row["name"]: row for row in scan["macros"]}
+    assert by_name["user_proj_example"]["config_path"].endswith(
+        "openlane/user_proj_example/config.json"
+    )
+    assert by_name["user_proj_example"]["estimated_area_mm2"] == "4.9280"
+    assert by_name["user_proj_example"]["area_source"] == "die_area"
+    assert not any("Multiple configs declare" in note for note in scan["notes"])
+
+
+def test_relative_floorplan_area_is_replaced_by_synthesis(tmp_path: Path):
+    _init_project(tmp_path)
+    _write(
+        tmp_path / "openlane" / "user_proj_example" / "config.json",
+        json.dumps(
+            {
+                "DESIGN_NAME": "user_proj_example",
+                "VERILOG_FILES": ["a.v"],
+                "FP_SIZING": "relative",
+                "DIE_AREA": [0, 0, 2800, 1760],
+            }
+        ),
+    )
+    scan = scan_project(tmp_path)
+    macro = scan["macros"][0]
+    assert macro["estimated_area_mm2"] == "4.9280"
+    assert macro["area_source"] is None
+    apply_synth_metrics(
+        macro,
+        {"gate_count": 40, "estimated_area_mm2": 0.02},
+        lint_errors=0,
+    )
+    assert macro["gate_count"] == 40
+    assert macro["estimated_area_mm2"] == "0.02"
+    assert macro["area_source"] == "synthesis"
 
 
 def test_preview_skip_synth_no_push(tmp_path: Path):
