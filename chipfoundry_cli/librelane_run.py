@@ -232,7 +232,7 @@ def double_wide_flake_dir(project_root: Path) -> Optional[Path]:
     """The double_wide project's own flake.nix dir, pinning LibreLane 3.
 
     double_wide ships its own flake (not cf-cli's `chipfoundry/openlane-2`
-    flake used by every other project type) because the flat wrapper needs
+    flake used by every other project type) so macros and the wrapper use
     LibreLane 3's native PDN-to-pad routing. Returns None if the project
     doesn't have one (e.g. it predates this, or a user deleted it).
     """
@@ -268,7 +268,7 @@ def build_double_wide_librelane_command(
     open_in_openroad: bool = False,
     open_in_klayout: bool = False,
 ) -> Tuple[List[str], Dict[str, str]]:
-    """Build the `nix develop` command that runs LibreLane 3 on a flat double_wide wrapper.
+    """Build the `nix develop` command that runs LibreLane 3 on a double_wide macro or wrapper.
 
     No `--manual-pdk`/`--pdk-root`/`--pdk` flags: LibreLane 3's default
     (Ciel-managed) PDK resolution auto-fetches the pinned PDK commit into

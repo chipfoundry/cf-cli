@@ -19,7 +19,7 @@ from chipfoundry_cli.utils import (
     GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE,
     detect_github_repo_url, get_head_commit_sha,
     PROJECT_TYPES, HARNESS_REPOS, is_padframe_only, harness_ref,
-    read_project_type, DOUBLE_WIDE_LIBRELANE_REV,
+    read_project_type, user_project_repo, DOUBLE_WIDE_LIBRELANE_REV,
 )
 from chipfoundry_cli import librelane_run
 import errno
@@ -2710,6 +2710,16 @@ def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
         except Exception:
             pass
         
+        linked_name = _linked_platform_project_name(os.getcwd(), config)
+        if linked_name is None:
+            console.print(
+                "[dim]Not linked to a platform project. Run [bold]cf link[/bold] "
+                "to show this project's SFTP status.[/dim]"
+            )
+            return
+        # Only this project's archive runs; other projects on the account are not shown.
+        archived_projects = [a for a in archived_projects if a[0] == linked_name]
+
         # Create main status table
         table = Table(title=f"SFTP Status for {sftp_username}")
         table.add_column("Project Name", style="cyan", no_wrap=True)
@@ -2745,24 +2755,16 @@ def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
             has_output = "Yes" if latest_tapeout[0] in results else "No"
             table.add_row(latest_tapeout[0], has_input, has_output, formatted_time)
         else:
-            # No tapeout runs yet, show active projects with their status
-            all_projects = set(projects) | set(results)
-            for proj in sorted(all_projects):
-                has_input = "Yes" if proj in projects else "No"
-                has_output = "Yes" if proj in results else "No"
-                last_tapeout = "No tapeout yet"
-                table.add_row(proj, has_input, has_output, last_tapeout)
-        
-        if table.row_count > 0:
-            console.print(table)
-        else:
-            console.print("[yellow]No projects or results found on SFTP server.[/yellow]")
-            
+            # No tapeout run for this project yet: show its input/output state only
+            has_input = "Yes" if linked_name in projects else "No"
+            has_output = "Yes" if linked_name in results else "No"
+            table.add_row(linked_name, has_input, has_output, "No tapeout yet")
+
+        console.print(table)
+
         # Add informative message about tapeout status
-        if not archived_projects and all_projects:
-            console.print("\n[cyan]Note: No tapeout runs have started yet. Your projects are waiting in the queue.[/cyan]")
-        elif not archived_projects and not all_projects:
-            console.print("\n[cyan]Note: No projects found and no tapeout runs have started yet.[/cyan]")
+        if not archived_projects:
+            console.print(f"\n[cyan]Note: No tapeout runs for {linked_name} have started yet.[/cyan]")
     finally:
         if transport:
             sftp.close()
@@ -3318,7 +3320,7 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
 @main.command('setup')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
 @click.option('--repo-owner', default='chipfoundry', help='GitHub repository owner (default: chipfoundry)')
-@click.option('--repo-name', default='caravel_user_project', help='GitHub repository name (default: caravel_user_project)')
+@click.option('--repo-name', default=None, help='GitHub repository name (default: the project-type template, otherwise caravel_user_project)')
 @click.option('--branch', default='main', help='Branch name (default: main)')
 @click.option('--pdk', default='sky130A', type=click.Choice(['sky130A', 'sky130B']), help='PDK variant (default: sky130A)')
 @click.option('--caravel-lite/--no-caravel-lite', default=True, help='Install caravel-lite (default) or full caravel')
@@ -3363,6 +3365,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     
     padframe_only = is_padframe_only(project_type)
     harness_repo = HARNESS_REPOS.get(project_type)
+    if repo_name is None:
+        repo_name = user_project_repo(project_type)
 
     had_errors = False
 
@@ -4197,13 +4201,14 @@ def _harden_double_wide(
     dry_run: bool,
     list_from_steps: bool,
 ):
-    """Harden a `double_wide` macro with LibreLane 3 (native PDN-to-pad routing).
+    """Harden a `double_wide` macro or wrapper with LibreLane 3.
 
     double_wide bypasses the OpenLane-2/Docker-venv path used by every other
-    project type: its upstream template ships its own `flake.nix` pinning
-    LibreLane 3, whose native PDN generator (`PDN_ENABLE_PINS`) reaches the
-    padframe-aligned power pins directly, so no bridging "connection" macro
-    or cf-cli-managed OpenLane install is needed.
+    project type. The user-project template ships its own `flake.nix` pinning
+    LibreLane 3. Macros are hardened on their own, then placed in the wrapper
+    through a MACROS entry. The wrapper PDN reaches padframe-aligned power
+    pins directly (`PDN_ENABLE_PINS`) and stitches each macro with
+    `PDN_MACRO_CONNECTIONS`, so no bridging "connection" macro is needed.
     """
     gui_mode_count = int(open_in_openroad) + int(open_in_klayout)
 
@@ -4414,10 +4419,10 @@ def harden(
 ):
     """Harden a macro using LibreLane (OpenLane 2).
 
-    For `double_wide` projects, hardens the single flat wrapper design with
-    LibreLane 3 instead (using the project's own pinned flake.nix), since its
-    native PDN generator routes directly to the padframe-aligned power pins.
-    Every other project type is unaffected and keeps using OpenLane 2.
+    For `double_wide` projects, hardens the named macro or the wrapper with
+    LibreLane 3 (the project's own pinned flake.nix). The wrapper PDN routes
+    directly to the padframe-aligned power pins. Every other project type
+    keeps using OpenLane 2.
 
     Examples:
         cf harden user_proj_example
@@ -4557,10 +4562,10 @@ def harden(
         console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
         sys.exit(1)
 
-    # `double_wide` is hardened as one flat design with LibreLane 3's native
-    # PDN-to-pad routing, using the project's own pinned flake.nix instead of
-    # cf-cli's OpenLane-2 Nix/Docker install. Every other project type falls
-    # through to the existing OpenLane 2 (CI2511) flow below, unaffected.
+    # `double_wide` macros and the wrapper are hardened with LibreLane 3,
+    # using the project's own pinned flake.nix instead of cf-cli's OpenLane-2
+    # Nix/Docker install. Every other project type falls through to the
+    # existing OpenLane 2 (CI2511) flow below.
     if read_project_type(project_root_path) == "double_wide":
         _harden_double_wide(
             macro=macro,
@@ -4947,7 +4952,7 @@ def repo_group():
 @repo_group.command('update')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--repo-owner', default='chipfoundry', help='GitHub repository owner (default: chipfoundry)')
-@click.option('--repo-name', default='caravel_user_project', help='GitHub repository name (default: caravel_user_project)')
+@click.option('--repo-name', default=None, help='GitHub repository name (default: the project-type template, otherwise caravel_user_project)')
 @click.option('--branch', default='main', help='Branch name containing the repo.json file (default: main)')
 @click.option('--dry-run', is_flag=True, help='Preview changes without updating files')
 def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
@@ -4958,7 +4963,10 @@ def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
         project_root = cwd_root
     if not project_root:
         project_root = os.getcwd()
-    
+
+    if repo_name is None:
+        repo_name = user_project_repo(read_project_type(Path(project_root)))
+
     console.print(f"[bold cyan]Updating repository files from {repo_owner}/{repo_name}@{branch}[/bold cyan]")
     
     try:
@@ -6020,6 +6028,22 @@ def _load_project_platform_id(project_root: str):
     with open(pj) as f:
         data = json.load(f)
     return data.get('project', {}).get('platform_project_id')
+
+
+def _linked_platform_project_name(project_root: str, config: dict) -> Optional[str]:
+    """Platform name of the linked project, or None when not linked/logged in.
+
+    SFTP folders are named after the platform project (same name `cf pull`
+    resolves), so this is the key for filtering SFTP status rows.
+    """
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id or not config.get('api_key'):
+        return None
+    project = _api_get(f"/projects/{platform_id}")
+    name = project.get('name')
+    if not name:
+        raise click.ClickException(f"Platform project {platform_id} has no name.")
+    return name
 
 
 def _find_remote_results_dir_by_uuid(sftp, platform_id: str) -> Optional[str]:
