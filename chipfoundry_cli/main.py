@@ -22,7 +22,9 @@ from chipfoundry_cli.utils import (
     read_project_type, DOUBLE_WIDE_LIBRELANE_REV,
 )
 from chipfoundry_cli import librelane_run
+import errno
 import os
+import stat
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
@@ -2988,6 +2990,175 @@ def submit(project_root):
     except SystemExit:
         raise click.Abort()
 
+_PROJECT_JSON_RELS = (".cf/project.json", "project.json")
+
+
+def _sftp_path_missing(exc: BaseException) -> bool:
+    if isinstance(exc, FileNotFoundError):
+        return True
+    return getattr(exc, "errno", None) == errno.ENOENT
+
+
+def _sftp_walk_files(sftp, path: str, prefix: str = ""):
+    """Yield file paths relative to ``path``."""
+    try:
+        entries = sftp.listdir_attr(path)
+    except OSError as exc:
+        if _sftp_path_missing(exc):
+            return
+        raise
+    for attr in entries:
+        name = attr.filename
+        rel = f"{prefix}/{name}" if prefix else name
+        remote = f"{path}/{name}"
+        if attr.st_mode is not None and stat.S_ISDIR(attr.st_mode):
+            yield from _sftp_walk_files(sftp, remote, rel)
+        else:
+            yield rel
+
+
+def _read_remote_json(sftp, path: str):
+    try:
+        with sftp.open(path, "r") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        if _sftp_path_missing(exc):
+            return None
+        raise
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    return json.loads(raw)
+
+
+def _sftp_remove_tree(sftp, path: str) -> None:
+    for attr in sftp.listdir_attr(path):
+        remote = f"{path}/{attr.filename}"
+        if attr.st_mode is not None and stat.S_ISDIR(attr.st_mode):
+            _sftp_remove_tree(sftp, remote)
+        else:
+            sftp.remove(remote)
+    sftp.rmdir(path)
+
+
+def list_incoming_confirm_candidates(sftp) -> List[dict]:
+    """Describe each directory under incoming/projects/.
+
+    Each candidate has name, platform_project_id, has_wrapper, and files.
+    """
+    root = "incoming/projects"
+    try:
+        entries = sftp.listdir_attr(root)
+    except OSError as exc:
+        if _sftp_path_missing(exc):
+            return []
+        raise
+
+    wrapper_rels = {f"gds/{name}" for name in GDS_TYPE_MAP}
+    candidates = []
+    for attr in entries:
+        if attr.st_mode is not None and not stat.S_ISDIR(attr.st_mode):
+            continue
+        name = attr.filename
+        project_dir = f"{root}/{name}"
+        files = tuple(_sftp_walk_files(sftp, project_dir))
+        platform_id = None
+        for rel in _PROJECT_JSON_RELS:
+            if rel not in files:
+                continue
+            data = _read_remote_json(sftp, f"{project_dir}/{rel}")
+            if not isinstance(data, dict):
+                break
+            platform_id = str(
+                ((data.get("project") or {}).get("platform_project_id") or "")
+            ).strip() or None
+            break
+        candidates.append({
+            "name": name,
+            "platform_project_id": platform_id,
+            "has_wrapper": any(rel in wrapper_rels for rel in files),
+            "files": files,
+        })
+    return candidates
+
+
+def _is_project_json_only(files) -> bool:
+    if not files:
+        return False
+    return set(files) <= set(_PROJECT_JSON_RELS)
+
+
+def resolve_confirm_sftp_dirname(
+    requested_name: str,
+    candidates: List[dict],
+    platform_project_id: Optional[str] = None,
+) -> str:
+    """Choose the incoming/projects directory cf confirm should update.
+
+    Push may have landed under the local folder name (``af-r2``) while
+    project.json names the project ``AF-R2``. Confirm must update the
+    directory that already holds this project's files instead of creating
+    a second directory that differs only by case.
+    """
+    requested = (requested_name or "").strip()
+    if not requested:
+        raise ValueError("project name is required")
+
+    def prefer(matches: List[dict]) -> str:
+        ranked = sorted(
+            matches,
+            key=lambda candidate: (
+                0 if candidate.get("has_wrapper") else 1,
+                0 if candidate["name"] == requested else 1,
+                candidate["name"].casefold(),
+            ),
+        )
+        return ranked[0]["name"]
+
+    target = (platform_project_id or "").strip()
+    if target:
+        id_matches = [
+            candidate for candidate in candidates
+            if (candidate.get("platform_project_id") or "") == target
+        ]
+        if id_matches:
+            return prefer(id_matches)
+
+    folded = requested.casefold()
+    name_matches = []
+    for candidate in candidates:
+        if candidate["name"].casefold() != folded:
+            continue
+        existing_id = (candidate.get("platform_project_id") or "").strip()
+        if target and existing_id and existing_id != target:
+            continue
+        name_matches.append(candidate)
+    if name_matches:
+        return prefer(name_matches)
+    return requested
+
+
+def confirm_duplicate_stub_dirs(
+    chosen_name: str,
+    requested_name: str,
+    candidates: List[dict],
+    platform_project_id: Optional[str] = None,
+) -> List[str]:
+    """Return json-only directories that duplicate the directory confirm updates."""
+    target = (platform_project_id or "").strip()
+    folds = {chosen_name.casefold(), (requested_name or "").casefold()}
+    stubs = []
+    for candidate in candidates:
+        if candidate["name"] == chosen_name:
+            continue
+        if not _is_project_json_only(candidate.get("files") or ()):
+            continue
+        same_id = bool(target) and (candidate.get("platform_project_id") or "") == target
+        same_name = candidate["name"].casefold() in folds
+        if same_id or same_name:
+            stubs.append(candidate["name"])
+    return stubs
+
+
 @main.command('confirm')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
@@ -3080,7 +3251,20 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
             username=sftp_username,
             key_path=key_path
         )
-        # Ensure the project directory exists before uploading
+        platform_project_id = str(
+            (project_data.get("project") or {}).get("platform_project_id") or ""
+        ).strip() or None
+        candidates = list_incoming_confirm_candidates(sftp)
+        requested_name = final_project_name
+        final_project_name = resolve_confirm_sftp_dirname(
+            requested_name,
+            candidates,
+            platform_project_id,
+        )
+        if final_project_name != requested_name:
+            console.print(
+                f"[yellow]Updating existing upload at incoming/projects/{final_project_name}[/yellow]"
+            )
         sftp_project_dir = f"incoming/projects/{final_project_name}"
         sftp_ensure_dirs(sftp, sftp_project_dir)
     except Exception as e:
@@ -3098,6 +3282,16 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
         )
         console.print(f"[green]✓ Confirmed project submission: {final_project_name}[/green]")
         console.print(f"[green]✓ Uploaded project.json to {remote_path}[/green]")
+        for stub_name in confirm_duplicate_stub_dirs(
+            final_project_name,
+            requested_name,
+            candidates,
+            platform_project_id,
+        ):
+            _sftp_remove_tree(sftp, f"incoming/projects/{stub_name}")
+            console.print(
+                f"[yellow]Removed duplicate directory incoming/projects/{stub_name}[/yellow]"
+            )
         
     except Exception as e:
         console.print(f"[red]Upload failed: {e}[/red]")
