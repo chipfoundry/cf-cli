@@ -243,13 +243,16 @@ class TestPrecheck:
         (src / "pyproject.toml").write_text("[project]\nname = 'cf-precheck'\n")
         monkeypatch.setenv("CF_PRECHECK_SOURCE", str(src))
         monkeypatch.setattr(cf_main.shutil, "which", lambda name: f"/usr/bin/{name}")
+        # CI has no TTY, so Rich wraps at 80 columns and a break can eat the
+        # space in "install -q". Print the dry run on one line.
+        monkeypatch.setattr(cf_main.console, "width", 10000)
         result = CliRunner().invoke(
             main, ["precheck", "--project-root", str(dw_project), "--dry-run"]
         )
         assert result.exit_code == 0, result.output
         out = result.output.replace("\n", "")
         assert f"-v {src.resolve()}:{src.resolve()}:ro" in out
-        assert f"pip3 install -q --root-user-action=ignore /tmp/cf-precheck-src" in out
+        assert "pip3 install -q --root-user-action=ignore /tmp/cf-precheck-src" in out
         assert "--upgrade -q --root-user-action=ignore cf-precheck" not in out
 
     def test_precheck_rejects_bad_local_source(self, dw_project: Path, tmp_path, monkeypatch):
