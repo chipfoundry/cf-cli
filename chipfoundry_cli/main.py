@@ -19,10 +19,12 @@ from chipfoundry_cli.utils import (
     GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE,
     detect_github_repo_url, get_head_commit_sha,
     PROJECT_TYPES, HARNESS_REPOS, is_padframe_only, harness_ref,
-    read_project_type, DOUBLE_WIDE_LIBRELANE_REV,
+    read_project_type, user_project_repo, DOUBLE_WIDE_LIBRELANE_REV,
 )
 from chipfoundry_cli import librelane_run
+import errno
 import os
+import stat
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
@@ -2708,6 +2710,16 @@ def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
         except Exception:
             pass
         
+        linked_name = _linked_platform_project_name(os.getcwd(), config)
+        if linked_name is None:
+            console.print(
+                "[dim]Not linked to a platform project. Run [bold]cf link[/bold] "
+                "to show this project's SFTP status.[/dim]"
+            )
+            return
+        # Only this project's archive runs; other projects on the account are not shown.
+        archived_projects = [a for a in archived_projects if a[0] == linked_name]
+
         # Create main status table
         table = Table(title=f"SFTP Status for {sftp_username}")
         table.add_column("Project Name", style="cyan", no_wrap=True)
@@ -2743,24 +2755,16 @@ def status(sftp_host, sftp_username, sftp_key, json_output, show_all):
             has_output = "Yes" if latest_tapeout[0] in results else "No"
             table.add_row(latest_tapeout[0], has_input, has_output, formatted_time)
         else:
-            # No tapeout runs yet, show active projects with their status
-            all_projects = set(projects) | set(results)
-            for proj in sorted(all_projects):
-                has_input = "Yes" if proj in projects else "No"
-                has_output = "Yes" if proj in results else "No"
-                last_tapeout = "No tapeout yet"
-                table.add_row(proj, has_input, has_output, last_tapeout)
-        
-        if table.row_count > 0:
-            console.print(table)
-        else:
-            console.print("[yellow]No projects or results found on SFTP server.[/yellow]")
-            
+            # No tapeout run for this project yet: show its input/output state only
+            has_input = "Yes" if linked_name in projects else "No"
+            has_output = "Yes" if linked_name in results else "No"
+            table.add_row(linked_name, has_input, has_output, "No tapeout yet")
+
+        console.print(table)
+
         # Add informative message about tapeout status
-        if not archived_projects and all_projects:
-            console.print("\n[cyan]Note: No tapeout runs have started yet. Your projects are waiting in the queue.[/cyan]")
-        elif not archived_projects and not all_projects:
-            console.print("\n[cyan]Note: No projects found and no tapeout runs have started yet.[/cyan]")
+        if not archived_projects:
+            console.print(f"\n[cyan]Note: No tapeout runs for {linked_name} have started yet.[/cyan]")
     finally:
         if transport:
             sftp.close()
@@ -2988,6 +2992,175 @@ def submit(project_root):
     except SystemExit:
         raise click.Abort()
 
+_PROJECT_JSON_RELS = (".cf/project.json", "project.json")
+
+
+def _sftp_path_missing(exc: BaseException) -> bool:
+    if isinstance(exc, FileNotFoundError):
+        return True
+    return getattr(exc, "errno", None) == errno.ENOENT
+
+
+def _sftp_walk_files(sftp, path: str, prefix: str = ""):
+    """Yield file paths relative to ``path``."""
+    try:
+        entries = sftp.listdir_attr(path)
+    except OSError as exc:
+        if _sftp_path_missing(exc):
+            return
+        raise
+    for attr in entries:
+        name = attr.filename
+        rel = f"{prefix}/{name}" if prefix else name
+        remote = f"{path}/{name}"
+        if attr.st_mode is not None and stat.S_ISDIR(attr.st_mode):
+            yield from _sftp_walk_files(sftp, remote, rel)
+        else:
+            yield rel
+
+
+def _read_remote_json(sftp, path: str):
+    try:
+        with sftp.open(path, "r") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        if _sftp_path_missing(exc):
+            return None
+        raise
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    return json.loads(raw)
+
+
+def _sftp_remove_tree(sftp, path: str) -> None:
+    for attr in sftp.listdir_attr(path):
+        remote = f"{path}/{attr.filename}"
+        if attr.st_mode is not None and stat.S_ISDIR(attr.st_mode):
+            _sftp_remove_tree(sftp, remote)
+        else:
+            sftp.remove(remote)
+    sftp.rmdir(path)
+
+
+def list_incoming_confirm_candidates(sftp) -> List[dict]:
+    """Describe each directory under incoming/projects/.
+
+    Each candidate has name, platform_project_id, has_wrapper, and files.
+    """
+    root = "incoming/projects"
+    try:
+        entries = sftp.listdir_attr(root)
+    except OSError as exc:
+        if _sftp_path_missing(exc):
+            return []
+        raise
+
+    wrapper_rels = {f"gds/{name}" for name in GDS_TYPE_MAP}
+    candidates = []
+    for attr in entries:
+        if attr.st_mode is not None and not stat.S_ISDIR(attr.st_mode):
+            continue
+        name = attr.filename
+        project_dir = f"{root}/{name}"
+        files = tuple(_sftp_walk_files(sftp, project_dir))
+        platform_id = None
+        for rel in _PROJECT_JSON_RELS:
+            if rel not in files:
+                continue
+            data = _read_remote_json(sftp, f"{project_dir}/{rel}")
+            if not isinstance(data, dict):
+                break
+            platform_id = str(
+                ((data.get("project") or {}).get("platform_project_id") or "")
+            ).strip() or None
+            break
+        candidates.append({
+            "name": name,
+            "platform_project_id": platform_id,
+            "has_wrapper": any(rel in wrapper_rels for rel in files),
+            "files": files,
+        })
+    return candidates
+
+
+def _is_project_json_only(files) -> bool:
+    if not files:
+        return False
+    return set(files) <= set(_PROJECT_JSON_RELS)
+
+
+def resolve_confirm_sftp_dirname(
+    requested_name: str,
+    candidates: List[dict],
+    platform_project_id: Optional[str] = None,
+) -> str:
+    """Choose the incoming/projects directory cf confirm should update.
+
+    Push may have landed under the local folder name (``af-r2``) while
+    project.json names the project ``AF-R2``. Confirm must update the
+    directory that already holds this project's files instead of creating
+    a second directory that differs only by case.
+    """
+    requested = (requested_name or "").strip()
+    if not requested:
+        raise ValueError("project name is required")
+
+    def prefer(matches: List[dict]) -> str:
+        ranked = sorted(
+            matches,
+            key=lambda candidate: (
+                0 if candidate.get("has_wrapper") else 1,
+                0 if candidate["name"] == requested else 1,
+                candidate["name"].casefold(),
+            ),
+        )
+        return ranked[0]["name"]
+
+    target = (platform_project_id or "").strip()
+    if target:
+        id_matches = [
+            candidate for candidate in candidates
+            if (candidate.get("platform_project_id") or "") == target
+        ]
+        if id_matches:
+            return prefer(id_matches)
+
+    folded = requested.casefold()
+    name_matches = []
+    for candidate in candidates:
+        if candidate["name"].casefold() != folded:
+            continue
+        existing_id = (candidate.get("platform_project_id") or "").strip()
+        if target and existing_id and existing_id != target:
+            continue
+        name_matches.append(candidate)
+    if name_matches:
+        return prefer(name_matches)
+    return requested
+
+
+def confirm_duplicate_stub_dirs(
+    chosen_name: str,
+    requested_name: str,
+    candidates: List[dict],
+    platform_project_id: Optional[str] = None,
+) -> List[str]:
+    """Return json-only directories that duplicate the directory confirm updates."""
+    target = (platform_project_id or "").strip()
+    folds = {chosen_name.casefold(), (requested_name or "").casefold()}
+    stubs = []
+    for candidate in candidates:
+        if candidate["name"] == chosen_name:
+            continue
+        if not _is_project_json_only(candidate.get("files") or ()):
+            continue
+        same_id = bool(target) and (candidate.get("platform_project_id") or "") == target
+        same_name = candidate["name"].casefold() in folds
+        if same_id or same_name:
+            stubs.append(candidate["name"])
+    return stubs
+
+
 @main.command('confirm')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--sftp-host', default=DEFAULT_SFTP_HOST, show_default=True, help='SFTP server hostname.')
@@ -3080,7 +3253,20 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
             username=sftp_username,
             key_path=key_path
         )
-        # Ensure the project directory exists before uploading
+        platform_project_id = str(
+            (project_data.get("project") or {}).get("platform_project_id") or ""
+        ).strip() or None
+        candidates = list_incoming_confirm_candidates(sftp)
+        requested_name = final_project_name
+        final_project_name = resolve_confirm_sftp_dirname(
+            requested_name,
+            candidates,
+            platform_project_id,
+        )
+        if final_project_name != requested_name:
+            console.print(
+                f"[yellow]Updating existing upload at incoming/projects/{final_project_name}[/yellow]"
+            )
         sftp_project_dir = f"incoming/projects/{final_project_name}"
         sftp_ensure_dirs(sftp, sftp_project_dir)
     except Exception as e:
@@ -3098,6 +3284,16 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
         )
         console.print(f"[green]✓ Confirmed project submission: {final_project_name}[/green]")
         console.print(f"[green]✓ Uploaded project.json to {remote_path}[/green]")
+        for stub_name in confirm_duplicate_stub_dirs(
+            final_project_name,
+            requested_name,
+            candidates,
+            platform_project_id,
+        ):
+            _sftp_remove_tree(sftp, f"incoming/projects/{stub_name}")
+            console.print(
+                f"[yellow]Removed duplicate directory incoming/projects/{stub_name}[/yellow]"
+            )
         
     except Exception as e:
         console.print(f"[red]Upload failed: {e}[/red]")
@@ -3124,7 +3320,7 @@ def confirm(project_root, sftp_host, sftp_username, sftp_key, project_name):
 @main.command('setup')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the project directory (defaults to current directory).')
 @click.option('--repo-owner', default='chipfoundry', help='GitHub repository owner (default: chipfoundry)')
-@click.option('--repo-name', default='caravel_user_project', help='GitHub repository name (default: caravel_user_project)')
+@click.option('--repo-name', default=None, help='GitHub repository name (default: the project-type template, otherwise caravel_user_project)')
 @click.option('--branch', default='main', help='Branch name (default: main)')
 @click.option('--pdk', default='sky130A', type=click.Choice(['sky130A', 'sky130B']), help='PDK variant (default: sky130A)')
 @click.option('--caravel-lite/--no-caravel-lite', default=True, help='Install caravel-lite (default) or full caravel')
@@ -3169,6 +3365,8 @@ def setup(project_root, repo_owner, repo_name, branch, pdk, caravel_lite,
     
     padframe_only = is_padframe_only(project_type)
     harness_repo = HARNESS_REPOS.get(project_type)
+    if repo_name is None:
+        repo_name = user_project_repo(project_type)
 
     had_errors = False
 
@@ -4003,13 +4201,14 @@ def _harden_double_wide(
     dry_run: bool,
     list_from_steps: bool,
 ):
-    """Harden a `double_wide` macro with LibreLane 3 (native PDN-to-pad routing).
+    """Harden a `double_wide` macro or wrapper with LibreLane 3.
 
     double_wide bypasses the OpenLane-2/Docker-venv path used by every other
-    project type: its upstream template ships its own `flake.nix` pinning
-    LibreLane 3, whose native PDN generator (`PDN_ENABLE_PINS`) reaches the
-    padframe-aligned power pins directly, so no bridging "connection" macro
-    or cf-cli-managed OpenLane install is needed.
+    project type. The user-project template ships its own `flake.nix` pinning
+    LibreLane 3. Macros are hardened on their own, then placed in the wrapper
+    through a MACROS entry. The wrapper PDN reaches padframe-aligned power
+    pins directly (`PDN_ENABLE_PINS`) and stitches each macro with
+    `PDN_MACRO_CONNECTIONS`, so no bridging "connection" macro is needed.
     """
     gui_mode_count = int(open_in_openroad) + int(open_in_klayout)
 
@@ -4220,10 +4419,10 @@ def harden(
 ):
     """Harden a macro using LibreLane (OpenLane 2).
 
-    For `double_wide` projects, hardens the single flat wrapper design with
-    LibreLane 3 instead (using the project's own pinned flake.nix), since its
-    native PDN generator routes directly to the padframe-aligned power pins.
-    Every other project type is unaffected and keeps using OpenLane 2.
+    For `double_wide` projects, hardens the named macro or the wrapper with
+    LibreLane 3 (the project's own pinned flake.nix). The wrapper PDN routes
+    directly to the padframe-aligned power pins. Every other project type
+    keeps using OpenLane 2.
 
     Examples:
         cf harden user_proj_example
@@ -4363,10 +4562,10 @@ def harden(
         console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
         sys.exit(1)
 
-    # `double_wide` is hardened as one flat design with LibreLane 3's native
-    # PDN-to-pad routing, using the project's own pinned flake.nix instead of
-    # cf-cli's OpenLane-2 Nix/Docker install. Every other project type falls
-    # through to the existing OpenLane 2 (CI2511) flow below, unaffected.
+    # `double_wide` macros and the wrapper are hardened with LibreLane 3,
+    # using the project's own pinned flake.nix instead of cf-cli's OpenLane-2
+    # Nix/Docker install. Every other project type falls through to the
+    # existing OpenLane 2 (CI2511) flow below.
     if read_project_type(project_root_path) == "double_wide":
         _harden_double_wide(
             macro=macro,
@@ -4753,7 +4952,7 @@ def repo_group():
 @repo_group.command('update')
 @click.option('--project-root', required=False, type=click.Path(exists=True, file_okay=False), help='Path to the local ChipFoundry project directory (defaults to current directory if .cf/project.json exists).')
 @click.option('--repo-owner', default='chipfoundry', help='GitHub repository owner (default: chipfoundry)')
-@click.option('--repo-name', default='caravel_user_project', help='GitHub repository name (default: caravel_user_project)')
+@click.option('--repo-name', default=None, help='GitHub repository name (default: the project-type template, otherwise caravel_user_project)')
 @click.option('--branch', default='main', help='Branch name containing the repo.json file (default: main)')
 @click.option('--dry-run', is_flag=True, help='Preview changes without updating files')
 def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
@@ -4764,7 +4963,10 @@ def repo_update(project_root, repo_owner, repo_name, branch, dry_run):
         project_root = cwd_root
     if not project_root:
         project_root = os.getcwd()
-    
+
+    if repo_name is None:
+        repo_name = user_project_repo(read_project_type(Path(project_root)))
+
     console.print(f"[bold cyan]Updating repository files from {repo_owner}/{repo_name}@{branch}[/bold cyan]")
     
     try:
@@ -5826,6 +6028,22 @@ def _load_project_platform_id(project_root: str):
     with open(pj) as f:
         data = json.load(f)
     return data.get('project', {}).get('platform_project_id')
+
+
+def _linked_platform_project_name(project_root: str, config: dict) -> Optional[str]:
+    """Platform name of the linked project, or None when not linked/logged in.
+
+    SFTP folders are named after the platform project (same name `cf pull`
+    resolves), so this is the key for filtering SFTP status rows.
+    """
+    platform_id = _load_project_platform_id(project_root)
+    if not platform_id or not config.get('api_key'):
+        return None
+    project = _api_get(f"/projects/{platform_id}")
+    name = project.get('name')
+    if not name:
+        raise click.ClickException(f"Platform project {platform_id} has no name.")
+    return name
 
 
 def _find_remote_results_dir_by_uuid(sftp, platform_id: str) -> Optional[str]:
