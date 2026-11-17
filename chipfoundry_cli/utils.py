@@ -42,11 +42,19 @@ HARNESS_REPOS: Dict[str, str] = {
 }
 DEFAULT_HARNESS_REF = "main"
 
-# `double_wide` is hardened as one flat design (no separate macros), and its
-# upstream template ships its own flake.nix pinning LibreLane 3: the native
-# PDN generator reaches the padframe-aligned power pins directly, so no
-# bridging "connection" macro is needed. Every other project type keeps using
-# `openlane_version` (LibreLane/OpenLane 2, fetched from cf-cli's versions.json).
+# User-project templates `cf repo update` syncs from. Types omitted here keep
+# the historical caravel_user_project default.
+USER_PROJECT_REPOS: Dict[str, str] = {
+    "double_wide": "dw_openframe_user_project",
+}
+DEFAULT_USER_PROJECT_REPO = "caravel_user_project"
+
+# `double_wide` hardens each macro and the wrapper with LibreLane 3. The
+# upstream template (dw_openframe_user_project) ships its own flake.nix: the
+# native PDN generator reaches the padframe-aligned power pins directly
+# (PDN_ENABLE_PINS) and stitches macro power through PDN_MACRO_CONNECTIONS,
+# so no bridging "connection" macro is needed. Every other project type keeps
+# using `openlane_version` (LibreLane/OpenLane 2, fetched from cf-cli's versions.json).
 # Pin the exact commit (not the `3.1.0.dev2` tag) so `nix` resolves it from the
 # local store/cache without an unauthenticated GitHub API call that can 403.
 DOUBLE_WIDE_LIBRELANE_REPO = "github:librelane/librelane"
@@ -88,6 +96,13 @@ def harness_ref(project_type: str, versions: Optional[dict] = None) -> str:
     """Git ref of the harness that `cf setup` installs for ``project_type``."""
     refs = (versions or {}).get("harness_refs") or {}
     return refs.get(project_type) or DEFAULT_HARNESS_REF
+
+
+def user_project_repo(project_type: str) -> str:
+    """GitHub repo name `cf repo update` syncs for ``project_type``."""
+    if project_type in USER_PROJECT_REPOS:
+        return USER_PROJECT_REPOS[project_type]
+    return DEFAULT_USER_PROJECT_REPO
 
 USER_DEFINES_REL = "verilog/rtl/user_defines.v"
 CF_PROJECT_JSON_REL = ".cf/project.json"

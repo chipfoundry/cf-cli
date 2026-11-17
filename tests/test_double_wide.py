@@ -16,9 +16,11 @@ from chipfoundry_cli.utils import (
     GDS_TYPE_MAP,
     HARNESS_REPOS,
     PROJECT_TYPES,
+    USER_PROJECT_REPOS,
     collect_project_files,
     harness_ref,
     is_padframe_only,
+    user_project_repo,
 )
 
 WRAPPER = "double_wide_openframe_project_wrapper"
@@ -71,6 +73,12 @@ class TestUtils:
         versions = {"harness_refs": {"double_wide": "DW2026.1"}}
         assert harness_ref("double_wide", versions) == "DW2026.1"
 
+    def test_user_project_repo(self):
+        assert USER_PROJECT_REPOS["double_wide"] == "dw_openframe_user_project"
+        assert user_project_repo("double_wide") == "dw_openframe_user_project"
+        assert user_project_repo("digital") == "caravel_user_project"
+        assert user_project_repo("openframe") == "caravel_user_project"
+
     def test_collect_without_user_defines(self, tmp_path: Path):
         (tmp_path / "gds").mkdir()
         (tmp_path / "gds" / f"{WRAPPER}.gds.gz").write_bytes(b"gz")
@@ -84,6 +92,50 @@ class TestUtils:
         (tmp_path / "gds" / "openframe_project_wrapper.gds").write_bytes(b"gds")
         with pytest.raises(FileNotFoundError, match="Multiple project types"):
             collect_project_files(str(tmp_path))
+
+
+class TestRepoUpdate:
+    def test_repo_update_uses_double_wide_template(self, tmp_path: Path, monkeypatch):
+        _write_project_json(tmp_path)
+        seen = {}
+
+        def fake_fetch(owner, name, path, branch):
+            seen["repo"] = (owner, name, path, branch)
+            return json.dumps({"changes": ["verilog/rtl/double_wide_openframe_project_wrapper.v"]})
+
+        monkeypatch.setattr("chipfoundry_cli.utils.fetch_github_file", fake_fetch)
+        result = CliRunner().invoke(
+            main, ["repo", "update", "--project-root", str(tmp_path), "--dry-run"]
+        )
+        assert result.exit_code == 0, result.output
+        assert seen["repo"] == (
+            "chipfoundry",
+            "dw_openframe_user_project",
+            ".cf/repo.json",
+            "main",
+        )
+        assert "chipfoundry/dw_openframe_user_project@main" in result.output
+
+    def test_repo_update_honors_explicit_repo_name(self, tmp_path: Path, monkeypatch):
+        _write_project_json(tmp_path)
+        seen = {}
+
+        def fake_fetch(owner, name, path, branch):
+            seen["name"] = name
+            return json.dumps({"changes": []})
+
+        monkeypatch.setattr("chipfoundry_cli.utils.fetch_github_file", fake_fetch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "repo", "update",
+                "--project-root", str(tmp_path),
+                "--repo-name", "caravel_user_project",
+                "--dry-run",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert seen["name"] == "caravel_user_project"
 
 
 class TestPushAndRemoteDetection:
@@ -339,3 +391,21 @@ class TestVerify:
         assert result.exit_code == 0, result.output
         assert "GPIO configuration not found" not in result.output
         assert "-t counter -sim RTL --openframe" in result.output.replace("\n", "")
+
+
+class TestLinkedPlatformProjectName:
+    def test_returns_none_when_not_linked(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(cf_main, "_load_project_platform_id", lambda _root: None)
+        assert cf_main._linked_platform_project_name(str(tmp_path), {"api_key": "k"}) is None
+
+    def test_returns_none_when_logged_out(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(cf_main, "_load_project_platform_id", lambda _root: "pid")
+        assert cf_main._linked_platform_project_name(str(tmp_path), {}) is None
+
+    def test_returns_platform_name(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(cf_main, "_load_project_platform_id", lambda _root: "pid")
+        monkeypatch.setattr(cf_main, "_api_get", lambda path: {"name": "dw-openframe-test"})
+        assert (
+            cf_main._linked_platform_project_name(str(tmp_path), {"api_key": "k"})
+            == "dw-openframe-test"
+        )

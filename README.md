@@ -118,10 +118,15 @@ Double-wide projects (`type: double_wide`, detected from
 `gds/double_wide_openframe_project_wrapper.gds`) use the same commands as
 openframe projects, with these differences:
 
+- Start from the user-project template
+  ([chipfoundry/dw_openframe_user_project](https://github.com/chipfoundry/dw_openframe_user_project)).
+  `cf repo update` syncs that template's `.cf/repo.json` file list.
 - `cf setup` clones the double-wide harness
   ([chipfoundry/double_wide_openframe](https://github.com/chipfoundry/double_wide_openframe))
   into `caravel/` instead of caravel-lite, and skips the management core wrapper.
   The harness ref comes from `harness_refs.double_wide` in `versions.json` (default `main`).
+- `cf harden` runs LibreLane 3 (the project's `flake.nix`) for each macro and
+  for `double_wide_openframe_project_wrapper`. Harden the macro first, then the wrapper.
 - `cf precheck` passes `caravel/` to cf-precheck as the golden root, since the
   precheck image only ships the standard caravel.
 - `cf verify` runs caravel-cocotb in OpenFrame mode. The harness supplies the
@@ -778,7 +783,7 @@ cf repo update [OPTIONS]
 **Options:**
 - `--project-root`: Specify project directory (defaults to current directory)
 - `--repo-owner`: GitHub repository owner (default: chipfoundry)
-- `--repo-name`: GitHub repository name (default: caravel_user_project)
+- `--repo-name`: GitHub repository name (default: `dw_openframe_user_project` for double-wide projects, otherwise `caravel_user_project`)
 - `--branch`: Branch name containing the repo.json file (default: main)
 - `--dry-run`: Preview changes without updating files
 
