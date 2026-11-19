@@ -2,6 +2,7 @@
 Tests for double-wide openframe (``double_wide``) project support.
 """
 import json
+from types import SimpleNamespace
 import os
 import stat
 from pathlib import Path
@@ -295,40 +296,74 @@ class TestHarden:
         macro_dir = root / "openlane" / macro
         macro_dir.mkdir(parents=True, exist_ok=True)
         (macro_dir / "config.json").write_text("{}")
-        (root / "flake.nix").write_text("{ }\n")
         return macro_dir
 
-    def test_harden_double_wide_dispatches_to_librelane3(self, dw_project: Path, monkeypatch):
+    def _fake_librelane_venv(self, root: Path) -> None:
+        """A stand-in for openlane/.venv whose python3 reports two steps."""
+        venv_bin = root / "openlane" / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        python3 = venv_bin / "python3"
+        steps = json.dumps({"steps": ["Yosys.Synthesis", "OpenROAD.Floorplan"]})
+        python3.write_text(f"#!/bin/sh\necho '{cf_main._STEPS_MARKER}{steps}'\n")
+        python3.chmod(0o755)
+
+    def _only_backend(self, monkeypatch, backend: str) -> None:
+        """Make exactly one of Nix / Docker look available."""
+        real_run = cf_main.subprocess.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] in ("nix", "docker"):
+                return SimpleNamespace(
+                    returncode=0 if cmd[0] == backend else 1, stdout=b"", stderr=b""
+                )
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(cf_main.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            cf_main.shutil, "which", lambda name: f"/usr/bin/{name}" if name == backend else None
+        )
+        monkeypatch.setattr(cf_main, "fetch_versions_from_upstream", lambda *a, **k: FAKE_VERSIONS)
+
+    def test_harden_double_wide_needs_librelane_venv(self, dw_project: Path):
+        """double_wide takes the same path as every other type: cf setup's venv."""
         self._make_double_wide_macro(dw_project)
-        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: dw_project)
-        monkeypatch.setattr(cf_main.librelane_run, "double_wide_nix_available", lambda flake_dir: True)
-        monkeypatch.setattr(
-            cf_main.librelane_run,
-            "get_double_wide_valid_from_steps",
-            lambda **kwargs: (["Yosys.Synthesis", "OpenROAD.Floorplan"], None),
+        result = CliRunner().invoke(
+            main, ["harden", WRAPPER, "--project-root", str(dw_project)]
         )
-        monkeypatch.setattr(
-            cf_main.librelane_run,
-            "build_double_wide_librelane_command",
-            lambda **kwargs: (["nix", "develop", str(dw_project), "--command", "librelane"], {}),
-        )
+        assert result.exit_code != 0
+        assert "LibreLane not installed" in result.output
+        assert "LibreLane 3" not in result.output
+
+    def test_harden_double_wide_uses_pinned_openlane2_via_nix(self, dw_project: Path, monkeypatch):
+        self._make_double_wide_macro(dw_project)
+        self._fake_librelane_venv(dw_project)
+        self._only_backend(monkeypatch, "nix")
         result = CliRunner().invoke(
             main, ["harden", WRAPPER, "--project-root", str(dw_project), "--dry-run"]
         )
         assert result.exit_code == 0, result.output
-        out = result.output.replace("\n", " ")
-        assert "LibreLane 3, native PDN-to-pad routing" in out
-        assert "nix develop" in out
+        out = result.output.replace("\n", "")
+        assert "github:chipfoundry/openlane-2/CI2511" in out
+        assert "--manual-pdk" in out
+        assert "nix develop" not in out
+        assert "LibreLane 3" not in out
 
-    def test_harden_double_wide_list_from_steps(self, dw_project: Path, monkeypatch):
+    def test_harden_double_wide_accepts_use_docker(self, dw_project: Path, monkeypatch):
         self._make_double_wide_macro(dw_project)
-        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: dw_project)
-        monkeypatch.setattr(cf_main.librelane_run, "double_wide_nix_available", lambda flake_dir: True)
-        monkeypatch.setattr(
-            cf_main.librelane_run,
-            "get_double_wide_valid_from_steps",
-            lambda **kwargs: (["Yosys.Synthesis", "OpenROAD.Floorplan"], None),
+        self._fake_librelane_venv(dw_project)
+        self._only_backend(monkeypatch, "docker")
+        result = CliRunner().invoke(
+            main,
+            ["harden", WRAPPER, "--project-root", str(dw_project), "--use-docker", "--dry-run"],
         )
+        assert result.exit_code == 0, result.output
+        out = result.output.replace("\n", "")
+        assert "does not support --use-docker" not in out
+        assert "--dockerized" in out
+
+    def test_harden_double_wide_list_from_steps(self, dw_project: Path):
+        self._make_double_wide_macro(dw_project)
+        self._fake_librelane_venv(dw_project)
         result = CliRunner().invoke(
             main, ["harden", WRAPPER, "--project-root", str(dw_project), "--list-from-steps"]
         )
@@ -336,33 +371,16 @@ class TestHarden:
         assert "Yosys.Synthesis" in result.output
         assert "OpenROAD.Floorplan" in result.output
 
-    def test_harden_double_wide_rejects_use_docker(self, dw_project: Path):
+    def test_harden_double_wide_needs_no_flake(self, dw_project: Path):
+        """The project's flake.nix is not what cf harden runs."""
         self._make_double_wide_macro(dw_project)
+        self._fake_librelane_venv(dw_project)
+        assert not (dw_project / "flake.nix").exists()
         result = CliRunner().invoke(
-            main, ["harden", WRAPPER, "--project-root", str(dw_project), "--use-docker"]
+            main, ["harden", WRAPPER, "--project-root", str(dw_project), "--list-from-steps"]
         )
-        assert result.exit_code != 0
-        assert "does not support --use-docker" in result.output
-
-    def test_harden_double_wide_requires_flake(self, dw_project: Path, monkeypatch):
-        self._make_double_wide_macro(dw_project)
-        (dw_project / "flake.nix").unlink()
-        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: None)
-        result = CliRunner().invoke(
-            main, ["harden", WRAPPER, "--project-root", str(dw_project)]
-        )
-        assert result.exit_code != 0
-        assert "No flake.nix found" in result.output
-
-    def test_harden_double_wide_requires_nix(self, dw_project: Path, monkeypatch):
-        self._make_double_wide_macro(dw_project)
-        monkeypatch.setattr(cf_main.librelane_run, "double_wide_flake_dir", lambda root: dw_project)
-        monkeypatch.setattr(cf_main.librelane_run, "double_wide_nix_available", lambda flake_dir: False)
-        result = CliRunner().invoke(
-            main, ["harden", WRAPPER, "--project-root", str(dw_project)]
-        )
-        assert result.exit_code != 0
-        assert "Nix not available" in result.output
+        assert result.exit_code == 0, result.output
+        assert "flake.nix" not in result.output
 
     def test_harden_other_project_types_unaffected(self, tmp_path: Path):
         """Non-double_wide project types must keep using the OpenLane 2 venv path."""
