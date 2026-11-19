@@ -19,7 +19,7 @@ from chipfoundry_cli.utils import (
     GPIO_MODES, GPIO_MODE_DESCRIPTIONS, GPIO_HEX_TO_MODE,
     detect_github_repo_url, get_head_commit_sha,
     PROJECT_TYPES, HARNESS_REPOS, is_padframe_only, harness_ref,
-    read_project_type, user_project_repo, DOUBLE_WIDE_LIBRELANE_REV,
+    read_project_type, user_project_repo,
 )
 from chipfoundry_cli import librelane_run
 import errno
@@ -4186,182 +4186,6 @@ def _queue_and_maybe_poll_remote_job(
         client.close()
 
 
-def _harden_double_wide(
-    *,
-    macro: str,
-    macro_dir: Path,
-    config_file: Path,
-    project_root_path: Path,
-    tag: Optional[str],
-    from_step: Optional[str],
-    open_in_openroad: bool,
-    open_in_klayout: bool,
-    pdk: Optional[str],
-    use_docker: bool,
-    dry_run: bool,
-    list_from_steps: bool,
-):
-    """Harden a `double_wide` macro or wrapper with LibreLane 3.
-
-    double_wide bypasses the OpenLane-2/Docker-venv path used by every other
-    project type. The user-project template ships its own `flake.nix` pinning
-    LibreLane 3. Macros are hardened on their own, then placed in the wrapper
-    through a MACROS entry. The wrapper PDN reaches padframe-aligned power
-    pins directly (`PDN_ENABLE_PINS`) and stitches each macro with
-    `PDN_MACRO_CONNECTIONS`, so no bridging "connection" macro is needed.
-    """
-    gui_mode_count = int(open_in_openroad) + int(open_in_klayout)
-
-    if use_docker:
-        console.print("[red]✗[/red] double_wide hardening does not support --use-docker")
-        console.print(
-            "[yellow]double_wide uses the project's own Nix flake (LibreLane 3). "
-            "Install Nix: https://librelane.readthedocs.io[/yellow]"
-        )
-        raise click.Abort()
-
-    flake_dir = librelane_run.double_wide_flake_dir(project_root_path)
-    if flake_dir is None:
-        console.print(f"[red]✗[/red] No flake.nix found in {project_root_path}")
-        console.print("[yellow]double_wide projects must ship a flake.nix pinning LibreLane 3[/yellow]")
-        raise click.Abort()
-
-    if not librelane_run.double_wide_nix_available(flake_dir):
-        console.print("[red]✗[/red] Nix not available or cannot resolve the project's LibreLane 3 flake")
-        console.print("[yellow]Install Nix from: https://librelane.readthedocs.io[/yellow]")
-        raise click.Abort()
-
-    pdk_root = librelane_run.pdk_root_dir(project_root_path)
-    pdk = librelane_run.detect_pdk(project_root_path, pdk)
-
-    valid_from_steps, valid_from_steps_error = librelane_run.get_double_wide_valid_from_steps(
-        flake_dir=flake_dir, config_file=config_file, working_dir=project_root_path,
-    )
-    if valid_from_steps_error:
-        console.print("[red]✗[/red] Failed to load LibreLane 3 step list for this macro")
-        console.print(f"[yellow]Error:[/yellow] {valid_from_steps_error}")
-        sys.exit(1)
-
-    if list_from_steps:
-        console.print(f"[bold cyan]Valid --from steps for {macro}:[/bold cyan]")
-        if valid_from_steps:
-            for step_name in valid_from_steps:
-                console.print(f"  • {step_name}")
-        else:
-            console.print("[yellow]No steps found for this flow[/yellow]")
-        return
-
-    if from_step and from_step not in (valid_from_steps or []):
-        console.print(f"[red]✗[/red] Invalid --from step: {from_step}")
-        matches = difflib.get_close_matches(from_step, valid_from_steps or [], n=5, cutoff=0.4)
-        if matches:
-            console.print("[yellow]Did you mean:[/yellow]")
-            for m in matches:
-                console.print(f"  • {m}")
-        else:
-            console.print(f"[yellow]Use 'cf harden {macro} --list-from-steps' to see valid step names[/yellow]")
-        sys.exit(1)
-
-    auto_selected_latest_tag = False
-    if (from_step or gui_mode_count) and not tag:
-        runs_dir = macro_dir / 'runs'
-        candidate_runs = [p for p in runs_dir.iterdir() if p.is_dir()] if runs_dir.exists() else []
-        if not candidate_runs:
-            console.print("[red]✗[/red] No existing runs found for this macro")
-            if gui_mode_count:
-                console.print("[yellow]Create a hardening run first, or specify --tag <existing_tag>[/yellow]")
-            else:
-                console.print("[yellow]Run without --from first, or specify --tag <existing_tag>[/yellow]")
-            sys.exit(1)
-        latest_run = max(candidate_runs, key=lambda p: p.stat().st_mtime)
-        tag = latest_run.name
-        auto_selected_latest_tag = True
-    elif not tag:
-        tag = librelane_run.new_run_tag()
-
-    console.print("\n" + "="*60)
-    console.print(f"[bold cyan]Hardening: {macro}[/bold cyan] [dim](LibreLane 3, native PDN-to-pad routing)[/dim]")
-    console.print(f"Config: [yellow]{config_file.name}[/yellow]")
-    console.print(f"Run tag: [yellow]{tag}[/yellow]")
-    if auto_selected_latest_tag:
-        if gui_mode_count:
-            console.print("[yellow]Using latest existing run tag (auto-selected because GUI mode was requested without --tag)[/yellow]")
-        else:
-            console.print("[yellow]Using latest existing run tag (auto-selected because --from was provided without --tag)[/yellow]")
-    if from_step:
-        console.print(f"Start from: [yellow]{from_step}[/yellow]")
-        console.print("[yellow]Mode:[/yellow] resume from existing state under this tag (no overwrite)")
-    if open_in_openroad:
-        console.print("[yellow]Mode:[/yellow] open existing run in OpenROAD GUI")
-    elif open_in_klayout:
-        console.print("[yellow]Mode:[/yellow] open existing run in KLayout GUI")
-    console.print(f"PDK: [yellow]{pdk}[/yellow]")
-    console.print(f"PDK Root: [yellow]{pdk_root}[/yellow]")
-    console.print("Execution: [yellow]Nix (project flake, LibreLane 3)[/yellow]")
-    console.print("="*60 + "\n")
-
-    cmd, env = librelane_run.build_double_wide_librelane_command(
-        project_root=project_root_path,
-        flake_dir=flake_dir,
-        config_file=config_file,
-        pdk_root=pdk_root,
-        pdk=pdk,
-        tag=tag,
-        from_step=from_step,
-        open_in_openroad=open_in_openroad,
-        open_in_klayout=open_in_klayout,
-    )
-
-    if dry_run:
-        console.print("[yellow]Dry run - command that would be executed:[/yellow]")
-        console.print(" ".join(cmd))
-        return
-
-    console.print(f"[cyan]Running LibreLane 3 via Nix on {macro}...[/cyan]")
-
-    process = None
-    try:
-        process = subprocess.Popen(
-            cmd,
-            cwd=str(project_root_path),
-            env=env,
-            preexec_fn=os.setsid if os.name != 'nt' else None,
-        )
-        returncode = process.wait()
-
-        if returncode == 0:
-            console.print(f"\n[green]✓[/green] [bold green]Successfully hardened {macro}![/bold green]")
-            console.print(f"[dim]Run directory: {macro_dir}/runs/{tag}/[/dim]")
-        elif returncode == -2 or returncode == 130:  # SIGINT
-            console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
-            sys.exit(130)
-        else:
-            console.print(f"\n[red]✗[/red] [bold red]Hardening failed with exit code {returncode}[/bold red]")
-            console.print(f"[yellow]Check logs in: {macro_dir}/runs/{tag}/[/yellow]")
-            sys.exit(returncode)
-
-    except KeyboardInterrupt:
-        console.print("\n[yellow]⚠[/yellow] Hardening interrupted by user")
-        try:
-            if process is not None:
-                if os.name != 'nt':
-                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                    process.wait(timeout=5)
-                else:
-                    process.terminate()
-                    process.wait(timeout=5)
-        except Exception:
-            if process is not None:
-                if os.name != 'nt':
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                else:
-                    process.kill()
-        sys.exit(130)
-    except Exception as e:
-        console.print(f"\n[red]✗[/red] Error: {e}")
-        sys.exit(1)
-
-
 @main.command(
     'harden',
     cls=CategorizedCommand,
@@ -4419,10 +4243,9 @@ def harden(
 ):
     """Harden a macro using LibreLane (OpenLane 2).
 
-    For `double_wide` projects, hardens the named macro or the wrapper with
-    LibreLane 3 (the project's own pinned flake.nix). The wrapper PDN routes
-    directly to the padframe-aligned power pins. Every other project type
-    keeps using OpenLane 2.
+    Every project type, `double_wide` included, hardens with the pinned
+    LibreLane 2 release, through Nix or Docker. In a `double_wide` project,
+    harden each macro first, then `double_wide_openframe_project_wrapper`.
 
     Examples:
         cf harden user_proj_example
@@ -4562,27 +4385,6 @@ def harden(
         console.print(f"[yellow]Expected one of: config.json, config.yaml, config.tcl[/yellow]")
         sys.exit(1)
 
-    # `double_wide` macros and the wrapper are hardened with LibreLane 3,
-    # using the project's own pinned flake.nix instead of cf-cli's OpenLane-2
-    # Nix/Docker install. Every other project type falls through to the
-    # existing OpenLane 2 (CI2511) flow below.
-    if read_project_type(project_root_path) == "double_wide":
-        _harden_double_wide(
-            macro=macro,
-            macro_dir=macro_dir,
-            config_file=Path(config_file),
-            project_root_path=project_root_path,
-            tag=tag,
-            from_step=from_step,
-            open_in_openroad=open_in_openroad,
-            open_in_klayout=open_in_klayout,
-            pdk=pdk,
-            use_docker=use_docker,
-            dry_run=dry_run,
-            list_from_steps=list_from_steps,
-        )
-        return
-
     # Check for LibreLane venv
     librelane_venv = openlane_dir / '.venv'
     if not librelane_venv.exists():
@@ -4705,7 +4507,8 @@ def harden(
                 result = subprocess.run(
                     ['nix', 'flake', 'metadata', f'github:chipfoundry/openlane-2/{openlane_version}', '--json'],
                     capture_output=True,
-                    timeout=5
+                    # The first call on a machine downloads the flake source.
+                    timeout=60
                 )
                 use_nix = result.returncode == 0
             except:
@@ -4898,7 +4701,12 @@ def harden(
         if from_step:
             cmd.extend(['--from', from_step])
         cmd.append(config_file)
-    
+
+    if dry_run:
+        console.print("[yellow]Dry run - command that would be executed:[/yellow]")
+        console.print(" ".join(str(part) for part in cmd), soft_wrap=True)
+        return
+
     # Run LibreLane
     
     try:
@@ -5419,7 +5227,8 @@ def precheck(project_root, skip_checks, magic_drc, checks, list_checks, dry_run,
     
     if dry_run:
         console.print("[bold yellow]Dry run - would execute:[/bold yellow]\n")
-        console.print("[dim]" + ' '.join(docker_cmd) + "[/dim]")
+        # soft_wrap: keep the command on one line so it can be copied as is.
+        console.print("[dim]" + ' '.join(docker_cmd) + "[/dim]", soft_wrap=True)
         return
     
     # Pull/update Docker image before running

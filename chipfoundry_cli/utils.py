@@ -49,17 +49,6 @@ USER_PROJECT_REPOS: Dict[str, str] = {
 }
 DEFAULT_USER_PROJECT_REPO = "caravel_user_project"
 
-# `double_wide` hardens each macro and the wrapper with LibreLane 3. The
-# upstream template (dw_openframe_user_project) ships its own flake.nix: the
-# native PDN generator reaches the padframe-aligned power pins directly
-# (PDN_ENABLE_PINS) and stitches macro power through PDN_MACRO_CONNECTIONS,
-# so no bridging "connection" macro is needed. Every other project type keeps
-# using `openlane_version` (LibreLane/OpenLane 2, fetched from cf-cli's versions.json).
-# Pin the exact commit (not the `3.1.0.dev2` tag) so `nix` resolves it from the
-# local store/cache without an unauthenticated GitHub API call that can 403.
-DOUBLE_WIDE_LIBRELANE_REPO = "github:librelane/librelane"
-DOUBLE_WIDE_LIBRELANE_REV = "f18a07aabb2dd3d6a7e3acc8c3b3621baa784a08"  # 3.1.0.dev2
-
 # Canonical GDS wrapper layouts used by remote precheck and remote push.
 # Each entry is (project_kind, base path without suffix). Suffixes below.
 # Keep in sync with chipignite-backend-services/src/precheck_service and

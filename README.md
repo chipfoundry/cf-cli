@@ -125,8 +125,9 @@ openframe projects, with these differences:
   ([chipfoundry/double_wide_openframe](https://github.com/chipfoundry/double_wide_openframe))
   into `caravel/` instead of caravel-lite, and skips the management core wrapper.
   The harness ref comes from `harness_refs.double_wide` in `versions.json` (default `main`).
-- `cf harden` runs LibreLane 3 (the project's `flake.nix`) for each macro and
-  for `double_wide_openframe_project_wrapper`. Harden the macro first, then the wrapper.
+- `cf harden` works as for any other project (the pinned LibreLane 2 release,
+  through Nix or Docker). Harden each macro first, then
+  `double_wide_openframe_project_wrapper`.
 - `cf precheck` passes `caravel/` to cf-precheck as the golden root, since the
   precheck image only ships the standard caravel.
 - `cf verify` runs caravel-cocotb in OpenFrame mode. The harness supplies the
